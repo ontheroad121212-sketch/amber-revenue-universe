@@ -517,36 +517,11 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
         prev_week_date = d - timedelta(days=7)
         josun_prev, _, _ = get_market_price_for_date(prev_week_date, df_flight, df_comp, search_date_str)
         
-        # 💡 3. 경쟁사 상한선(Ceiling) 설정용 평균가
-        comp_prices = [p for p in [josun_p, parnas_p] if pd.notna(p) and p > 0]
-        comp_avg = sum(comp_prices) / len(comp_prices) if comp_prices else 0
-
-        # 💡 2. 리드타임 페널티 가중치 (미래 날짜일수록 덤핑에 대한 죄질이 무거움)
-        days_left = (d - TODAY).days
-        lead_weight = 1.0
-        if days_left > 30: lead_weight = 1.5
-        elif days_left > 14: lead_weight = 1.2
-        elif days_left < 3: lead_weight = 0.8  # 임박한 할인은 일부 참작
-
-        for rid in DYNAMIC_ROOMS:
-            curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
-            if curr_match.empty:
-                continue
-            avail = curr_match.iloc[0]['Available']
-            total = curr_match.iloc[0]['Total']
-            occ, real_bar, real_price, _ = get_final_values(rid, d, avail, total)
-            
-            _, sim_bar, sim_price_raw, boost, signal_str = get_sim_bar(
-                rid, d, avail, total,
-                josun_p, flight_p, parnas_p,
-                josun_threshold, flight_threshold,
-                josun_prev_price=josun_prev, events=events, sensitivity=sensitivity
-            )
-            
-            # [상한선 필터링] 시뮬 제안가가 경쟁사 평균의 15%를 초과하면 캡(Cap)을 씌움 (비현실적 인상 방지)
+            # [상한선 필터링] 시뮬 제안가가 경쟁사 평균의 30%를 초과하면 캡(Cap)을 씌움
             sim_price = sim_price_raw
-            if comp_avg > 0 and sim_price > (comp_avg * 1.15):
-                sim_price = comp_avg * 1.15
+            if comp_avg > 0 and sim_price > (comp_avg * 1.30):
+                # 💡 수정: 캡을 씌우더라도 '실제 판매가' 밑으로 떨어뜨려서 면죄부를 주지 않도록 방어
+                sim_price = max(comp_avg * 1.30, real_price) 
 
             try: sold_rooms = max(0, float(total) - (float(avail) if pd.notna(avail) else 0))
             except: sold_rooms = 0
@@ -557,13 +532,15 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
             # [순수익 기회비용 계산] 가격 저항(이탈률)과 변동비를 고려한 진짜 손실액 도출
             if real_price > 0 and sim_price > real_price and sold_rooms > 0:
                 price_inc_pct = (sim_price - real_price) / real_price
-                e_factor = 1.5  # 수요 탄력성
-                churn_rate = min(1.0, price_inc_pct * e_factor)  # 이탈률
+                
+                # 💡 핵심 수정: 5성급 하이엔드의 수요 탄력성을 0.3으로 대폭 하향 (가격 올려도 잘 안 도망감)
+                e_factor = 0.3  
+                churn_rate = min(0.3, price_inc_pct * e_factor)  # 이탈률 최대치도 30%로 제한
                 
                 sim_sold_rooms = sold_rooms * (1 - churn_rate)
                 
                 net_real = sold_rooms * (real_price - VC)  # 총지배인 방식의 순수익
-                net_sim = sim_sold_rooms * (sim_price - VC) # 아키텍트 방식의 순수익
+                net_sim = sim_sold_rooms * (sim_price - VC) # 시스템 방식의 순수익
                 
                 raw_opp_cost = net_sim - net_real
                 
@@ -571,7 +548,7 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
                 if raw_opp_cost > 0:
                     net_opp_cost = raw_opp_cost * lead_weight
                     
-                    # 💡 4. 죄목 분리 (브랜드 훼손 vs 업사이드 누수)
+                    # 죄목 분리 (브랜드 훼손 vs 업사이드 누수)
                     base_floor = PRICE_TABLE.get(rid, {}).get("BAR8", 300000) * 0.85
                     if real_price < base_floor:
                         loss_type = "🩸 브랜드훼손(덤핑)"
@@ -580,8 +557,6 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
                 else:
                     # 올렸을 때 수익이 오히려 떨어지면 기회비용 0, 시뮬 단가 원복
                     sim_price = real_price
-
-            price_diff = sim_price - real_price
 
             records.append({
                 '날짜': d, '요일': WEEKDAYS_KR[d.weekday()], '객실타입': rid,

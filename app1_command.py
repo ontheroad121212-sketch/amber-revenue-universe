@@ -2037,8 +2037,8 @@ if not st.session_state.cmd_today_df.empty:
         st.markdown("")
 
     # 📜 과거 기록 (접힌 상태)
-    if st.session_state.cmd_compare_label:
-        st.info(f"ℹ️ {st.session_state.cmd_compare_label}")
+    if fixed_alerts_past:
+        with st.expander(f"📜 마감된 과거 기록 {len(fixed_alerts_past)}건 보기", expanded=False):
             st.caption("이미 지나간 날짜들 - 당시 수기 인상 대상이었던 날들의 기록")
             for a in fixed_alerts_past[-10:]:
                 level_color = "#C62828" if a['level'] == 'critical' else "#FF6F00"
@@ -2048,8 +2048,8 @@ if not st.session_state.cmd_today_df.empty:
                     · 당시 점유율 {a['전체점유율']}% · {a['단계']} (마감됨)
                 </div>""", unsafe_allow_html=True)
 
-    if st.session_state.compare_label:
-        st.info(f"ℹ️ {st.session_state.compare_label}")
+    if st.session_state.cmd_compare_label:
+        st.info(f"ℹ️ {st.session_state.cmd_compare_label}")
 
     # ----------------------------------------------------
     # [신규 추가] 표 표시용 날짜 필터 (탭 메뉴 바로 위에 배치)

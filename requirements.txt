@@ -11,3 +11,8 @@ xlrd
 pyarrow
 supabase
 firebase-admin
+requests
+beautifulsoup4
+scikit-learn
+seaborn
+matplotlib

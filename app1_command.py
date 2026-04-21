@@ -2160,7 +2160,7 @@ if not st.session_state.cmd_today_df.empty:
             <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); 
                         padding: 30px; border-radius: 15px; color: white; text-align: center; margin-bottom: 20px;
                         border: 2px solid #FF5252;'>
-                <div style='font-size: 16px; color: #FF8A80;'>박리다매 고집으로 증발한 순수익 (Net Loss)</div>
+                <div style='font-size: 16px; color: #FF8A80;'>박리다매 판매방식으로 증발한 순수익 (Net Loss)</div>
                 <div style='font-size: 48px; font-weight: bold; color: #FF5252;'>₩ {int(total_opp_cost):,}</div>
             </div>
             """, unsafe_allow_html=True)
@@ -2181,14 +2181,14 @@ if not st.session_state.cmd_today_df.empty:
                 
                 fig1 = px.bar(daily_opp, x='라벨', y='기회비용', color='손실유형',
                               color_discrete_map={'🩸 브랜드훼손(덤핑)': '#D32F2F', '💸 업사이드누수(홀딩)': '#FF9800'},
-                              title="일자별 순수익 누수액 및 죄목 분류")
+                              title="일자별 순수익 누수액 및 분류")
                 fig1.update_layout(template="plotly_white", height=400, xaxis_tickangle=-45)
                 st.plotly_chart(fig1, use_container_width=True)
             else:
                 # 손실이 아예 없는 완벽한 상태일 때 띄워줄 메시지
                 st.success("✅ 기회비용(수익 누수)이 발생한 일자가 없습니다. 완벽한 가격 방어입니다!")
 
-            st.subheader("🔥 최악의 오판 TOP 10 (Worst Decisions)")
+            st.subheader("🔥 나쁜 결정 TOP 10 (Worst Decisions)")
             st.caption("경쟁사 상한선 필터 및 리드타임 페널티가 적용된 정밀 타격 리스트입니다.")
             
             top10 = positive_opp.nlargest(10, '기회비용').copy()

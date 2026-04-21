@@ -2151,7 +2151,7 @@ if not st.session_state.cmd_today_df.empty:
             
             # 날짜별 누수액 차트
             daily_opp = positive_opp.groupby(['날짜', '요일', '손실유형'])['기회비용'].sum().reset_index()
-            daily_opp['라벨'] = daily_opp['날짜'].apply(lambda x: x.strftime('%m-%d')) + '(' + daily_opp['요일'] + ')'
+            daily_opp['라벨'] = daily_opp.apply(lambda row: f"{row['날짜'].strftime('%m-%d')}({row['요일']})", axis=1)
             
             if not daily_opp.empty:
                 fig1 = px.bar(daily_opp, x='라벨', y='기회비용', color='손실유형',

@@ -563,8 +563,8 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
                 price_inc_pct = (sim_price - real_price) / real_price
                 
                 # 💡 핵심 수정: 5성급 하이엔드의 수요 탄력성을 0.3으로 대폭 하향 (가격 올려도 잘 안 도망감)
-                e_factor = 0.3  
-                churn_rate = min(0.3, price_inc_pct * e_factor)  # 이탈률 최대치도 30%로 제한
+                e_factor = 0.6 
+                churn_rate = min(0.6, price_inc_pct * e_factor)  # 이탈률 최대치도 30%로 제한
                 
                 sim_sold_rooms = sold_rooms * (1 - churn_rate)
                 

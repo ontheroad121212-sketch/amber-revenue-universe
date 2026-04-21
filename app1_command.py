@@ -1371,7 +1371,7 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
         pdf.ln(2)
 
         daily_opp = opp_df.groupby(['날짜', '요일'])['기회비용'].sum().reset_index()
-        daily_opp['라벨'] = daily_opp['날짜'].apply(lambda x: x.strftime('%m-%d'))
+        daily_opp['라벨'] = daily_opp['날짜'].apply(lambda x: x.strftime('%m-%d')) + '(' + daily_opp['요일'].astype(str) + ')'
 
         try:
             fig1 = px.bar(daily_opp, x='라벨', y='기회비용',

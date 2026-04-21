@@ -765,7 +765,7 @@ if avail_files:
     except Exception as e: st.sidebar.error(f"재고 분석 에러: {e}")
 
 # ======================================================================
-# 🚀 [아키텍트 엔진 v6.9] PMS 증분 병합 (채널/거래처 데이터 보존)
+# 🚀 [아키텍트 엔진 v6.9] PMS 증분 병합 (Q열 거래처 우선 추출 버전)
 # ======================================================================
 if pms_files:
     try:
@@ -775,7 +775,8 @@ if pms_files:
                 raw = pd.read_csv(f, encoding='cp949', header=None) if f.name.endswith('.csv') else pd.read_excel(f, header=None)
                 h_idx = -1
                 for i in range(min(25, len(raw))):
-                    if '입실일자' in "".join([str(x) for x in raw.iloc[i].values]):
+                    row_values = [str(x) for x in raw.iloc[i].values]
+                    if '입실일자' in "".join(row_values):
                         h_idx = i; break
                 if h_idx != -1:
                     df_d = raw.iloc[h_idx+1:].copy()
@@ -797,8 +798,10 @@ if pms_files:
             c_tp = find_column(new_v_df, ['객실타입', 'RoomType'])
             c_id = find_column(new_v_df, ['예약번호', 'ConfNo', 'No', '예약번호 '])
             c_bk = find_column(new_v_df, ['예약일자', '예약일'])
-            # 💡 [추가] Q열에 있는 '거래처' 컬럼을 찾아서 변수에 저장합니다!
-            c_ch = find_column(new_v_df, ['거래처', '예약처', 'Channel', '예약경로'])
+            
+            # 💡 [핵심 수정] '거래처'를 가장 먼저 찾도록 순서를 강제 조정합니다. 
+            # '예약경로'보다 '거래처'라는 단어가 보이면 무조건 그걸 잡습니다.
+            c_ch = find_column(new_v_df, ['거래처', '거래처명', '예약처', 'Channel', '예약경로', 'Source'])
 
             new_v_df['Temp_In'] = pd.to_datetime(new_v_df[c_in], errors='coerce')
             new_v_df['Val_Nights'] = pd.to_numeric(new_v_df[c_rn].astype(str).str.extract(r'(\d+)')[0], errors='coerce').fillna(1).astype(int)
@@ -814,8 +817,10 @@ if pms_files:
             def expand_v69(row):
                 unit_daily_rev = row['Rate_Per_Night'] / row['Val_Rooms'] if row['Val_Rooms'] > 0 else 0
                 res_id = str(row[c_id]).strip() if c_id and pd.notna(row[c_id]) else f"{row[c_tp]}_{row['Rate_Per_Night']}"
-                # 💡 [추가] 거래처 데이터가 있으면 빼내고, 없으면 '기타'로 둡니다.
-                ch_name = str(row[c_ch]).strip() if c_ch and pd.notna(row[c_ch]) else "기타 (Unknown)"
+                
+                # 💡 [보정] 거래처 컬럼에서 값을 추출할 때 빈칸이나 에러를 더 꼼꼼히 체크합니다.
+                raw_ch = row.get(c_ch, "기타")
+                ch_name = str(raw_ch).strip() if pd.notna(raw_ch) and str(raw_ch).strip() != "" else "기타 (Unknown)"
                 
                 rows = []
                 for n in range(row['Val_Nights']):
@@ -828,7 +833,7 @@ if pms_files:
                             '객실타입': row[c_tp],
                             'Temp_In': row['Temp_In'],
                             'Temp_Bk': row['Temp_Bk'],
-                            'Channel': ch_name,  # 💡 [추가] 분해된 데이터 표에 거래처 이름도 같이 담아줍니다!
+                            'Channel': ch_name,  # 이제 U열 대신 Q열의 '거래처'가 들어갑니다.
                             'Unique_Key': f"{res_id}_{current_date.strftime('%Y%m%d')}_R{r}"
                         })
                 return rows
@@ -844,7 +849,7 @@ if pms_files:
 
             df_full_pms = combined_pms.drop_duplicates(subset=['Unique_Key'], keep='last').reset_index(drop=True)
 
-            st.sidebar.success(f"✅ PMS 증분 업데이트 완료: 총 {len(df_full_pms):,} RN 원자적 분해 완료")
+            st.sidebar.success(f"✅ PMS 증분 업데이트 완료 (거래처 데이터 포함)")
 
     except Exception as e:
         st.sidebar.error(f"PMS 분석 오류: {e}")

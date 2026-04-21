@@ -596,6 +596,23 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
             })
     return pd.DataFrame(records)
 
+# 💡 아까 실수로 같이 지워졌던 함수 복구!
+def get_our_avg_price_for_dates(current_df, target_dates):
+    result = {}
+    for d in target_dates:
+        prices = []
+        for rid in DYNAMIC_ROOMS:
+            curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
+            if curr_match.empty:
+                continue
+            avail = curr_match.iloc[0]['Available']
+            total = curr_match.iloc[0]['Total']
+            _, _, price, _ = get_final_values(rid, d, avail, total)
+            if price > 0:
+                prices.append(price)
+        result[d] = sum(prices) / len(prices) if prices else None
+    return result
+
 # ============================================================
 # 14. 오늘 알림
 # ============================================================

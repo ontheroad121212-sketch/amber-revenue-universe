@@ -502,7 +502,7 @@ def get_market_price_for_date(target_date, df_flight, df_comp, search_date_str=N
     return josun_price, parnas_price, flight_price
 
 # ============================================================
-# 13. 기회비용 계산
+# 13. [고도화] 기회비용 계산 (변동비, 이탈률, 상한선, 죄목 분리)
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def calculate_opportunity_cost(current_df, df_flight, df_comp,
@@ -510,10 +510,24 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
                                 search_date_str=None, events=None, sensitivity=None):
     records = []
     dates = sorted(current_df['Date'].unique())
+    VC = 50000  # 💡 1. 1객실당 변동비 (청소, 세탁, 어메니티 등)
+
     for d in dates:
         josun_p, parnas_p, flight_p = get_market_price_for_date(d, df_flight, df_comp, search_date_str)
         prev_week_date = d - timedelta(days=7)
         josun_prev, _, _ = get_market_price_for_date(prev_week_date, df_flight, df_comp, search_date_str)
+        
+        # 💡 3. 경쟁사 상한선(Ceiling) 설정용 평균가
+        comp_prices = [p for p in [josun_p, parnas_p] if pd.notna(p) and p > 0]
+        comp_avg = sum(comp_prices) / len(comp_prices) if comp_prices else 0
+
+        # 💡 2. 리드타임 페널티 가중치 (미래 날짜일수록 덤핑에 대한 죄질이 무거움)
+        days_left = (d - TODAY).days
+        lead_weight = 1.0
+        if days_left > 30: lead_weight = 1.5
+        elif days_left > 14: lead_weight = 1.2
+        elif days_left < 3: lead_weight = 0.8  # 임박한 할인은 일부 참작
+
         for rid in DYNAMIC_ROOMS:
             curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
             if curr_match.empty:
@@ -521,44 +535,66 @@ def calculate_opportunity_cost(current_df, df_flight, df_comp,
             avail = curr_match.iloc[0]['Available']
             total = curr_match.iloc[0]['Total']
             occ, real_bar, real_price, _ = get_final_values(rid, d, avail, total)
-            _, sim_bar, sim_price, boost, signal_str = get_sim_bar(
+            
+            _, sim_bar, sim_price_raw, boost, signal_str = get_sim_bar(
                 rid, d, avail, total,
                 josun_p, flight_p, parnas_p,
                 josun_threshold, flight_threshold,
                 josun_prev_price=josun_prev, events=events, sensitivity=sensitivity
             )
-            try:
-                sold_rooms = max(0, float(total) - (float(avail) if pd.notna(avail) else 0))
-            except:
-                sold_rooms = 0
+            
+            # [상한선 필터링] 시뮬 제안가가 경쟁사 평균의 15%를 초과하면 캡(Cap)을 씌움 (비현실적 인상 방지)
+            sim_price = sim_price_raw
+            if comp_avg > 0 and sim_price > (comp_avg * 1.15):
+                sim_price = comp_avg * 1.15
+
+            try: sold_rooms = max(0, float(total) - (float(avail) if pd.notna(avail) else 0))
+            except: sold_rooms = 0
+            
+            net_opp_cost = 0
+            loss_type = "정상"
+
+            # [순수익 기회비용 계산] 가격 저항(이탈률)과 변동비를 고려한 진짜 손실액 도출
+            if real_price > 0 and sim_price > real_price and sold_rooms > 0:
+                price_inc_pct = (sim_price - real_price) / real_price
+                e_factor = 1.5  # 수요 탄력성
+                churn_rate = min(1.0, price_inc_pct * e_factor)  # 이탈률
+                
+                sim_sold_rooms = sold_rooms * (1 - churn_rate)
+                
+                net_real = sold_rooms * (real_price - VC)  # 총지배인 방식의 순수익
+                net_sim = sim_sold_rooms * (sim_price - VC) # 아키텍트 방식의 순수익
+                
+                raw_opp_cost = net_sim - net_real
+                
+                # 시뮬대로 했을 때 순수익이 더 크다면 기회비용 발생
+                if raw_opp_cost > 0:
+                    net_opp_cost = raw_opp_cost * lead_weight
+                    
+                    # 💡 4. 죄목 분리 (브랜드 훼손 vs 업사이드 누수)
+                    base_floor = PRICE_TABLE.get(rid, {}).get("BAR8", 300000) * 0.85
+                    if real_price < base_floor:
+                        loss_type = "🩸 브랜드훼손(덤핑)"
+                    else:
+                        loss_type = "💸 업사이드누수(홀딩)"
+                else:
+                    # 올렸을 때 수익이 오히려 떨어지면 기회비용 0, 시뮬 단가 원복
+                    sim_price = real_price
+
             price_diff = sim_price - real_price
-            opp_cost = price_diff * sold_rooms
+
             records.append({
                 '날짜': d, '요일': WEEKDAYS_KR[d.weekday()], '객실타입': rid,
                 '점유율(%)': round(occ, 1), '판매객실수': int(sold_rooms),
                 '실제BAR': real_bar, '실제단가': int(real_price),
                 '시뮬BAR': sim_bar, '시뮬단가': int(sim_price),
-                '단가차이': int(price_diff), '기회비용': int(opp_cost),
+                '단가차이': int(price_diff), 
+                '기회비용': int(net_opp_cost),
+                '손실유형': loss_type,
                 'BAR상승': boost, '시그널': signal_str,
                 'is_past': d < TODAY,
             })
     return pd.DataFrame(records)
-
-def get_our_avg_price_for_dates(current_df, target_dates):
-    result = {}
-    for d in target_dates:
-        prices = []
-        for rid in DYNAMIC_ROOMS:
-            curr_match = current_df[(current_df['RoomID'] == rid) & (current_df['Date'] == d)]
-            if curr_match.empty:
-                continue
-            avail = curr_match.iloc[0]['Available']
-            total = curr_match.iloc[0]['Total']
-            _, _, price, _ = get_final_values(rid, d, avail, total)
-            if price > 0:
-                prices.append(price)
-        result[d] = sum(prices) / len(prices) if prices else None
-    return result
 
 # ============================================================
 # 14. 오늘 알림
@@ -2078,54 +2114,63 @@ if not st.session_state.cmd_today_df.empty:
 
     # =============== TAB 3: 기회비용 ===============
     with tab3:
-        st.subheader("💸 기회비용 분석")
+        st.subheader("💸 Net Revenue 기회비용 진단 (변동비/이탈률 반영)")
+        st.info("💡 **[Architect Logic]** 단순 매출 차이가 아닙니다. 단가 인상 시 발생하는 **예약 이탈률(Churn)**과 1객실당 **변동비(VC: 5만 원) 절감액**을 모두 계산하여 도출한 **'진짜 순수익(Net Profit) 손실액'**입니다.")
 
-        view_mode = st.radio(
-            "보기 모드",
-            ["🔮 미래 (오늘 이후)", "📜 과거 (마감 기록)", "📊 전체"],
-            horizontal=True
-        )
+        view_mode = st.radio("보기 모드", ["🔮 미래 (오늘 이후)", "📜 과거 (마감 기록)", "📊 전체"], horizontal=True)
 
         opp_df = alert_opp_df.copy()
-        if view_mode == "🔮 미래 (오늘 이후)":
-            opp_df = opp_df[opp_df['날짜'] >= TODAY]
-        elif view_mode == "📜 과거 (마감 기록)":
-            opp_df = opp_df[opp_df['날짜'] < TODAY]
+        if view_mode == "🔮 미래 (오늘 이후)": opp_df = opp_df[opp_df['날짜'] >= TODAY]
+        elif view_mode == "📜 과거 (마감 기록)": opp_df = opp_df[opp_df['날짜'] < TODAY]
 
         if opp_df.empty:
             st.info("해당 범위에 데이터가 없습니다.")
         else:
-            positive_opp = opp_df[opp_df['기회비용'] > 0]['기회비용'].sum()
-            boosted_count = (opp_df['BAR상승'] > 0).sum()
-            days_affected = opp_df[opp_df['기회비용'] > 0]['날짜'].nunique()
+            positive_opp = opp_df[opp_df['기회비용'] > 0]
+            total_opp_cost = positive_opp['기회비용'].sum()
+            
+            # 죄목별 분리
+            dumping_loss = positive_opp[positive_opp['손실유형'] == '🩸 브랜드훼손(덤핑)']['기회비용'].sum()
+            holding_loss = positive_opp[positive_opp['손실유형'] == '💸 업사이드누수(홀딩)']['기회비용'].sum()
+
             st.markdown(f"""
             <div style='background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%); 
-                        padding: 30px; border-radius: 15px; color: white; text-align: center; margin-bottom: 20px;'>
-                <div style='font-size: 16px; color: #80D8FF;'>{view_mode} 추정 추가 수익</div>
-                <div style='font-size: 42px; font-weight: bold; color: #FFD700;'>₩ {int(positive_opp):,}</div>
+                        padding: 30px; border-radius: 15px; color: white; text-align: center; margin-bottom: 20px;
+                        border: 2px solid #FF5252;'>
+                <div style='font-size: 16px; color: #FF8A80;'>박리다매 고집으로 증발한 순수익 (Net Loss)</div>
+                <div style='font-size: 48px; font-weight: bold; color: #FF5252;'>₩ {int(total_opp_cost):,}</div>
             </div>
             """, unsafe_allow_html=True)
-            m1, m2, m3 = st.columns(3)
-            m1.metric("시그널 발동", f"{boosted_count}건")
-            m2.metric("영향 날짜", f"{days_affected}일")
-            m3.metric("객실타입", f"{opp_df['객실타입'].nunique()}개")
+            
+            c1, c2, c3 = st.columns(3)
+            c1.metric("🩸 브랜드 훼손 (저가 덤핑)", f"₩ {int(dumping_loss):,}", "마지노선 이하 무리한 판매로 인한 손실", delta_color="inverse")
+            c2.metric("💸 업사이드 누수 (단가 홀딩)", f"₩ {int(holding_loss):,}", "시장 호황에도 단가를 안 올려 발생한 손실", delta_color="inverse")
+            c3.metric("손실 발생 일수", f"{positive_opp['날짜'].nunique()}일", "타겟 기간 내 오판 횟수", delta_color="inverse")
 
             st.divider()
-            daily_opp = opp_df.groupby(['날짜', '요일'])['기회비용'].sum().reset_index()
+            
+            # 날짜별 누수액 차트
+            daily_opp = positive_opp.groupby(['날짜', '요일', '손실유형'])['기회비용'].sum().reset_index()
             daily_opp['라벨'] = daily_opp['날짜'].apply(lambda x: x.strftime('%m-%d')) + '(' + daily_opp['요일'] + ')'
-            fig1 = px.bar(daily_opp, x='라벨', y='기회비용', color='기회비용',
-                          color_continuous_scale=['#E8F5E9', '#FF5252'])
-            fig1.update_layout(template="plotly_white", height=400, xaxis_tickangle=-45, showlegend=False)
-            st.plotly_chart(fig1, use_container_width=True)
+            
+            if not daily_opp.empty:
+                fig1 = px.bar(daily_opp, x='라벨', y='기회비용', color='손실유형',
+                              color_discrete_map={'🩸 브랜드훼손(덤핑)': '#D32F2F', '💸 업사이드누수(홀딩)': '#FF9800'},
+                              title="일자별 순수익 누수액 및 죄목 분류")
+                fig1.update_layout(template="plotly_white", height=400, xaxis_tickangle=-45)
+                st.plotly_chart(fig1, use_container_width=True)
 
-            st.subheader("🔥 TOP 10")
-            top10 = opp_df[opp_df['기회비용'] > 0].nlargest(10, '기회비용').copy()
+            st.subheader("🔥 최악의 오판 TOP 10 (Worst Decisions)")
+            st.caption("경쟁사 상한선 필터 및 리드타임 페널티가 적용된 정밀 타격 리스트입니다.")
+            
+            top10 = positive_opp.nlargest(10, '기회비용').copy()
             top10['메모'] = top10['날짜'].apply(lambda d: "📝" if get_note_key(d) in all_notes else "⚪")
             top10['날짜'] = top10['날짜'].apply(lambda x: x.strftime('%Y-%m-%d'))
+            
             for col in ['실제단가', '시뮬단가', '단가차이', '기회비용']:
                 top10[col] = top10[col].apply(lambda x: f"₩{int(x):,}")
-            st.dataframe(top10[['날짜', '요일', '객실타입', '판매객실수', '실제BAR',
-                                '시뮬BAR', '기회비용', '시그널', '메모']],
+                
+            st.dataframe(top10[['날짜', '객실타입', '판매객실수', '실제BAR', '시뮬BAR', '단가차이', '기회비용', '손실유형', '시그널', '메모']],
                          use_container_width=True, hide_index=True)
 
     # =============== TAB 4: 시장 트렌드 ===============

@@ -47,30 +47,31 @@ if not check_password():
     st.stop()
 
 # ============================================================
-# 3. Firebase 초기화
+# 3. Firebase 및 DB 초기화
 # ============================================================
 existing_apps = [a.name for a in firebase_admin._apps.values()] if firebase_admin._apps else []
 
+# 💡 [해결] 팀장님 시크릿 키 이름인 "firebase"로 정확히 매칭!
 if "hotel_app" not in existing_apps:
     try:
-        cred_h = credentials.Certificate(dict(st.secrets["firebase_hotel"]))
+        cred_h = credentials.Certificate(dict(st.secrets["firebase"]))
         firebase_admin.initialize_app(cred_h, name="hotel_app")
     except Exception as e:
         st.error(f"호텔 Firebase 연결 실패: {e}")
-        st.stop()
 
 if "flight_app" not in existing_apps:
     try:
-        cred_f = credentials.Certificate(dict(st.secrets["firebase_flight"]))
-        firebase_admin.initialize_app(cred_f, name="flight_app")
-    except Exception as e:
-        st.warning(f"항공 Firebase 연결 실패: {e}")
+        # flight 키가 없으면 부드럽게 패스하도록 예외 처리
+        if "firebase_flight" in st.secrets:
+            cred_f = credentials.Certificate(dict(st.secrets["firebase_flight"]))
+            firebase_admin.initialize_app(cred_f, name="flight_app")
+    except:
+        pass
 
 try:
-    db = firestore.client(app=firebase_admin.get_app("hotel_app"))
+    db_hotel = firestore.client(app=firebase_admin.get_app("hotel_app"))
 except:
-    st.error("호텔 DB 연결 실패")
-    st.stop()
+    db_hotel = None
 
 try:
     db_flight = firestore.client(app=firebase_admin.get_app("flight_app"))

@@ -892,7 +892,11 @@ def robust_date_parser(d_val):
     return None
 
 def get_latest_snapshot():
-    docs = db.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
+    # 호텔 DB에서 가져와야 함!
+    if not db_hotel:
+        return pd.DataFrame(), None
+    
+    docs = db_hotel.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
@@ -900,7 +904,6 @@ def get_latest_snapshot():
             df['Date'] = pd.to_datetime(df['Date']).dt.date
         return df, d_dict.get('work_date', '알수없음')
     return pd.DataFrame(), None
-
 # ============================================================
 # 18-A. UI 필터용 헬퍼 함수 (신규 추가)
 # ============================================================
@@ -1917,28 +1920,31 @@ with st.sidebar:
     
     if st.button("🚀 최신 데이터 동기화", type="primary", use_container_width=True):
         with st.spinner("요금 에디터 데이터 불러오는 중..."):
-            
+        
             st.cache_data.clear() # ✨ 핵심: 동기화 누를 때 기존 캐시(메모리) 강제 삭제!
-            
+          
             latest_db, save_dt = get_latest_snapshot()
-            
+        
             if not latest_db.empty:
                 st.session_state.cmd_today_df = latest_db.sort_values(by=['Date', 'RoomID'])
-                
+            
                 # 어제 데이터(비교군) 가져오기 로직
-                docs = db.collection("daily_snapshots").where("work_date", "<", date.today().strftime("%Y-%m-%d")).order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()
-                prev_found = False
-                for doc in docs:
-                    p_dict = doc.to_dict()
-                    p_df = pd.DataFrame(p_dict.get('data', []))
-                    if not p_df.empty and 'Date' in p_df.columns:
-                        p_df['Date'] = pd.to_datetime(p_df['Date']).dt.date
-                        st.session_state.cmd_prev_df = p_df
-                        prev_found = True
+                if db_hotel:  # ← 🔴 변경 1: 안전장치 추가
+                    docs = db_hotel.collection("daily_snapshots").where("work_date", "<", date.today().strftime("%Y-%m-%d")).order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()  # ← 🔴 변경 2: db → db_hotel
+                    prev_found = False
+                    for doc in docs:
+                        p_dict = doc.to_dict()
+                        p_df = pd.DataFrame(p_dict.get('data', []))
+                        if not p_df.empty and 'Date' in p_df.columns:
+                            p_df['Date'] = pd.to_datetime(p_df['Date']).dt.date
+                            st.session_state.cmd_prev_df = p_df
+                            prev_found = True
                 
-                if not prev_found:
+                    if not prev_found:
+                        st.session_state.cmd_prev_df = pd.DataFrame()
+                else:  # ← 🔴 변경 3: db_hotel이 None일 때 대비
                     st.session_state.cmd_prev_df = pd.DataFrame()
-                    
+                
                 st.session_state.cmd_compare_label = f"✅ 동기화 완료 (요금 에디터 기준: {save_dt})"
                 st.rerun()
             else:

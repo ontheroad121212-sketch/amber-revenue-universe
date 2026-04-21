@@ -265,7 +265,7 @@ try:
     app_hotel = firebase_admin.get_app("hotel_app")
 except ValueError:
     if "firebase" in st.secrets:
-        cred_h = credentials.Certificate(dict(st.secrets["firebase"]))
+        cred_h = credentials.Certificate(dict(st.secrets["firebase_hotel"]))
         app_hotel = firebase_admin.initialize_app(cred_h, name="hotel_app")
     else:
         app_hotel = None

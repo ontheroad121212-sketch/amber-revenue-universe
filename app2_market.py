@@ -1,1516 +1,1271 @@
 import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-import numpy as np
-from datetime import datetime, timedelta, timezone 
-import calendar
-import re
-import os
-import base64
-import json
-from io import BytesIO
-from fpdf import FPDF
-from supabase import create_client, Client
 import firebase_admin
 from firebase_admin import credentials, firestore
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
+from datetime import datetime
 
+# -----------------------------------------------------------------------------
+# 1. 파이어베이스 연결 (통합 포털 호환용)
+# -----------------------------------------------------------------------------
+# 페이지 설정(st.set_page_config)은 main.py에서 하므로 삭제했습니다.
 
-# --- 🌟 Firebase 초기화 로직 (Streamlit Secrets 활용) ---
+# 1, 3번 앱에서 이미 연결해둔 DB(flight_app)가 있으면 그대로 빌려 씁니다.
+try:
+    app_flight = firebase_admin.get_app("flight_app")
+except ValueError:
+    # 만약 연결이 안 되어 있다면 여기서 안전하게 연결합니다.
+    if "firebase_flight" in st.secrets:
+        cred = credentials.Certificate(dict(st.secrets["firebase_flight"]))
+    else:
+        cred = credentials.Certificate("serviceAccountKey.json")
+    app_flight = firebase_admin.initialize_app(cred, name="flight_app")
+
+db = firestore.client(app=app_flight)
+
+# -----------------------------------------------------------------------------
+# 2. 데이터 로드 및 전처리 함수
+# -----------------------------------------------------------------------------
+@st.cache_data(ttl=600) # 10분마다 데이터 갱신
+def load_data():
+    # 파이어베이스에서 모든 데이터 가져오기
+    docs = db.collection('hotel_comp_prices').stream()
+    
+    data = []
+    for doc in docs:
+        d = doc.to_dict()
+        # 데이터 정제 (딕셔너리 리스트로 변환)
+        row = {
+            "CheckIn_Date": d.get("date"),            # 숙박 예정일 (예: 2026-03-28)
+            "Search_Date": d.get("search_date_str"),  # 크롤링한 날짜 (예: 20260206)
+            "Hotel": d.get("hotel_name"),
+            "Min_Price": d.get("price"),
+            "Amber_Twin": d.get("hill_amber_twin"),    # 엠버 전용
+            "Pine_Double": d.get("hill_pine_double"),  # 엠버 전용
+            "Timestamp": d.get("crawled_at")
+        }
+        data.append(row)
+    
+    if not data:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(data)
+    
+    # 날짜 형식 변환
+    df["CheckIn_Date"] = pd.to_datetime(df["CheckIn_Date"])
+    df["Search_Date_DT"] = pd.to_datetime(df["Search_Date"], format="%Y%m%d")
+    
+    # 정렬
+    df = df.sort_values(by=["CheckIn_Date", "Search_Date_DT"])
+    return df
+
+# -----------------------------------------------------------------------------
+# 3. 메인 대시보드 UI
+# -----------------------------------------------------------------------------
+st.title("🏨 Jeju Hotel Market Intelligence")
+st.markdown(f"**엠버퓨어힐 전략 상황실** | *Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
+
+# 데이터 로드
+df = load_data()
+
+if df.empty:
+    st.warning("⚠️ 아직 수집된 데이터가 없습니다. 'hotel_spy.py'를 먼저 실행해서 데이터를 모아주세요.")
+else:
+    # 가장 최근에 조사한 데이터만 필터링 (현재 시장가)
+    latest_search_date = df["Search_Date"].max()
+    current_market_df = df[df["Search_Date"] == latest_search_date].copy()
+
+    # 상단 요약 메트릭
+    st.markdown("---")
+    col1, col2, col3, col4 = st.columns(4)
+    
+    # 엠버 평균 최저가 계산
+    amber_avg = current_market_df[current_market_df["Hotel"]=="Amber_Pure_Hill"]["Min_Price"].mean()
+    parnas_avg = current_market_df[current_market_df["Hotel"]=="Parnas_Jeju"]["Min_Price"].mean()
+    josun_avg = current_market_df[current_market_df["Hotel"]=="Grand_Josun"]["Min_Price"].mean()
+
+    col1.metric("엠버퓨어힐 평균가", f"{int(amber_avg):,}원" if pd.notnull(amber_avg) else "-")
+    col2.metric("파르나스 제주 평균가", f"{int(parnas_avg):,}원" if pd.notnull(parnas_avg) else "-", 
+                delta=f"{int(amber_avg - parnas_avg):,}원" if pd.notnull(parnas_avg) else None, delta_color="inverse")
+    col3.metric("그랜드조선 평균가", f"{int(josun_avg):,}원" if pd.notnull(josun_avg) else "-",
+                delta=f"{int(amber_avg - josun_avg):,}원" if pd.notnull(josun_avg) else None, delta_color="inverse")
+    col4.metric("데이터 기준일", f"{latest_search_date} (Latest)")
+
+    st.markdown("---")
+
+    # 탭 구성
+    tab1, tab2, tab3 = st.tabs(["⚔️ 경쟁사 비교 (Market)", "💎 엠버 객실 전략 (Internal)", "📈 가격 변동 추이 (History)"])
+
+    # -------------------------------------------------------------------------
+    # [Tab 1] 경쟁사 비교 그래프
+    # -------------------------------------------------------------------------
+    with tab1:
+        st.subheader(f"📅 일별 최저가 흐름 (기준: {latest_search_date} 조사)")
+        
+        # 선 그래프 그리기
+        fig_comp = px.line(current_market_df, 
+                           x="CheckIn_Date", 
+                           y="Min_Price", 
+                           color="Hotel",
+                           markers=True,
+                           color_discrete_map={
+                               "Amber_Pure_Hill": "#FF4B4B",  # 엠버는 강조색(Red)
+                               "Parnas_Jeju": "#1f77b4",      # 파르나스(Blue)
+                               "Grand_Josun": "#2ca02c"       # 조선(Green)
+                           },
+                           hover_data={"Min_Price": ":,.0f"})
+        
+        fig_comp.update_layout(height=500, xaxis_title="체크인 날짜", yaxis_title="최저가 (원)")
+        st.plotly_chart(fig_comp, use_container_width=True)
+
+    # -------------------------------------------------------------------------
+    # [Tab 2] 엠버 내부 객실 분석
+    # -------------------------------------------------------------------------
+    with tab2:
+        st.subheader("💎 엠버퓨어힐 객실 등급별 가격 Gap 분석")
+        
+        amber_data = current_market_df[current_market_df["Hotel"] == "Amber_Pure_Hill"].copy()
+        
+        if amber_data.empty:
+            st.info("엠버퓨어힐 데이터가 없습니다.")
+        else:
+            # 그래프용 데이터 구조 변경 (Melt)
+            # 최저가, 힐엠버트윈, 힐파인더블을 하나의 컬럼으로 합침
+            amber_melted = amber_data.melt(id_vars=["CheckIn_Date"], 
+                                           value_vars=["Min_Price", "Amber_Twin", "Pine_Double"],
+                                           var_name="Room_Type", value_name="Price")
+            
+            # 결측치 제거 (가격 없는 날 제외)
+            amber_melted = amber_melted.dropna(subset=["Price"])
+
+            fig_internal = px.line(amber_melted, 
+                                   x="CheckIn_Date", 
+                                   y="Price", 
+                                   color="Room_Type",
+                                   markers=True,
+                                   line_dash="Room_Type", # 선 스타일 다르게
+                                   title="객실 타입별 가격 차이 (Spread)",
+                                   color_discrete_map={
+                                       "Min_Price": "gray",
+                                       "Amber_Twin": "#FFA15A",
+                                       "Pine_Double": "#EF553B"
+                                   })
+            
+            fig_internal.update_traces(hovertemplate='%{y:,.0f}원')
+            fig_internal.update_layout(height=500, xaxis_title="체크인 날짜", yaxis_title="판매가 (원)")
+            st.plotly_chart(fig_internal, use_container_width=True)
+            
+            # [전략 인사이트] Gap 통계 보여주기
+            st.markdown("#### 💡 Strategy Insight: Price Gap")
+            gap_col1, gap_col2 = st.columns(2)
+            
+            # 평균 Gap 계산
+            amber_data["Gap_Twin"] = amber_data["Amber_Twin"] - amber_data["Min_Price"]
+            amber_data["Gap_Double"] = amber_data["Pine_Double"] - amber_data["Min_Price"]
+            
+            avg_gap_twin = amber_data["Gap_Twin"].mean()
+            avg_gap_double = amber_data["Gap_Double"].mean()
+            
+            gap_col1.info(f"**힐 엠버 트윈 프리미엄:** 평균 +{int(avg_gap_twin):,}원 (vs 최저가)")
+            gap_col2.success(f"**힐 파인 더블 프리미엄:** 평균 +{int(avg_gap_double):,}원 (vs 최저가)")
+
+    # -------------------------------------------------------------------------
+    # [Tab 3] 가격 변동 추이 (Time Travel)
+    # -------------------------------------------------------------------------
+    with tab3:
+        st.subheader("📈 특정 날짜의 가격 변동 이력 (언제 가격이 올랐나?)")
+        
+        # 사용자가 분석하고 싶은 '체크인 날짜' 선택
+        available_dates = sorted(df["CheckIn_Date"].unique())
+        selected_date = st.selectbox("체크인 날짜를 선택하세요:", available_dates, format_func=lambda x: x.strftime('%Y-%m-%d'))
+        
+        # 선택한 날짜의 데이터만 필터링
+        history_df = df[df["CheckIn_Date"] == selected_date].copy()
+        
+        if history_df.empty:
+            st.write("선택한 날짜의 기록이 없습니다.")
+        else:
+            # x축을 '조사한 날짜(Search_Date)'로 설정하여 시계열 변화 확인
+            fig_history = go.Figure()
+
+            # 1. 엠버 최저가
+            amber_hist = history_df[history_df["Hotel"]=="Amber_Pure_Hill"]
+            fig_history.add_trace(go.Scatter(x=amber_hist["Search_Date_DT"], y=amber_hist["Min_Price"], 
+                                             mode='lines+markers', name='엠버 최저가', line=dict(color='red')))
+            
+            # 2. 엠버 트윈/더블
+            fig_history.add_trace(go.Scatter(x=amber_hist["Search_Date_DT"], y=amber_hist["Amber_Twin"], 
+                                             mode='lines+markers', name='힐 엠버 트윈', line=dict(color='orange', dash='dot')))
+            
+            # 3. 파르나스
+            parnas_hist = history_df[history_df["Hotel"]=="Parnas_Jeju"]
+            fig_history.add_trace(go.Scatter(x=parnas_hist["Search_Date_DT"], y=parnas_hist["Min_Price"], 
+                                             mode='lines+markers', name='파르나스', line=dict(color='blue')))
+            
+            # 4. 조선
+            josun_hist = history_df[history_df["Hotel"]=="Grand_Josun"]
+            fig_history.add_trace(go.Scatter(x=josun_hist["Search_Date_DT"], y=josun_hist["Min_Price"], 
+                                             mode='lines+markers', name='조선', line=dict(color='green')))
+
+            fig_history.update_layout(title=f"{selected_date.strftime('%Y-%m-%d')} 숙박 요금의 변화 추이",
+                                      xaxis_title="데이터 수집일 (Search Date)",
+                                      yaxis_title="가격 (원)",
+                                      hovermode="x unified")
+            st.plotly_chart(fig_history, use_container_width=True)
+            
+            st.caption("※ X축은 데이터를 수집한 날짜입니다. 그래프가 우상향하면 가격이 오르고 있다는 뜻입니다.")
+
+import streamlit as st
+import pandas as pd
+import firebase_admin
+from firebase_admin import credentials, firestore
+import os
+import requests
+from datetime import datetime, timedelta
+import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import numpy as np
+
+# =============================================================================
+# 1. 시스템 설정 및 세션 초기화
+# =============================================================================
+st.set_page_config(page_title="2026 비상 시크릿 랩", layout="wide")
+
+if 'otb_data' not in st.session_state:
+    st.session_state['otb_data'] = pd.DataFrame()
+
+def check_password():
+    if "password_guessed" not in st.session_state:
+        st.session_state["password_guessed"] = False
+    
+    if not st.session_state["password_guessed"]:
+        st.title("🔐 Secret Strategy Access")
+        st.write("관계자 외 출입금지")
+        password = st.text_input("접속 암호를 입력하세요", type="password")
+        if password == "2026viva":
+            st.session_state["password_guessed"] = True
+            st.rerun()
+        return False
+    return True
+
+# =========================================================================
+# 2. 글로벌 DB 완벽 연결 (중복 연결 에러 원천 차단)
+# =========================================================================
+# 1) 기본 앱 (viva_key.json)
 if not firebase_admin._apps:
     try:
-        # Streamlit Secrets에서 Firebase 인증 정보 가져오기
-        cred_dict = dict(st.secrets["firebase"])
-        cred = credentials.Certificate(cred_dict)
+        cred = credentials.Certificate("viva_key.json")
         firebase_admin.initialize_app(cred)
-    except Exception as e:
-        pass # Firebase 에러 발생해도 UI 다운 방지
-
-# Supabase 연결
-url = "https://rixjzhfjrmzppysxhvmb.supabase.co"
-key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJpeGp6aGZqcm16cHB5c3hodm1iIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NTQzMjQ5NywiZXhwIjoyMDkxMDA4NDk3fQ.42laWyEBMIwQ1p3p0NxhakVyMrabRHD3vVaIJvcfh5g"
-supabase = create_client(url, key)
-
-def datetime_handler(x):
-    if isinstance(x, (datetime, pd.Timestamp)):
-        return x.isoformat()
-    raise TypeError(f"Object of type {type(x)} is not JSON serializable")
-
-def save_to_cloud(save_name, pms_df, sob_data, avail_data):
-    payload = {
-        "save_name": save_name,
-        "pms": pms_df.to_json(orient='split', date_format='iso') if not pms_df.empty else None,
-        "sob": sob_data,
-        "avail": avail_data
-    }
-    try:
-        unique_master_id = int(datetime.now(timezone(timedelta(hours=9))).timestamp())
-        
-        supabase.table("amber_snapshots").upsert({
-            "month": unique_master_id, 
-            "data": json.dumps(payload, default=datetime_handler)
-        }, on_conflict="month").execute()
-        
-        st.sidebar.success(f"✅ [{save_name}] 전체 데이터 통합 백업 완료!")
-    except Exception as e:
-        st.sidebar.error(f"❌ 저장 실패: {e}")
-
-def get_snapshots_by_date(selected_date):
-    try:
-        # 선택된 날짜의 시작(00:00:00)과 끝(23:59:59) 타임스탬프 계산
-        start_dt = datetime.combine(selected_date, datetime.min.time())
-        end_dt = datetime.combine(selected_date, datetime.max.time())
-        
-        # 한국 시간 기준 타임스탬프로 변환
-        start_ts = int(start_dt.timestamp())
-        end_ts = int(end_dt.timestamp())
-        
-        # 💡 [아키텍트 패치] 선택한 날짜의 범위 내 데이터만 정밀 조회 (타임아웃 원천 차단)
-        res = supabase.table("amber_snapshots").select("month, data").gte("month", start_ts).lte("month", end_ts).order("month", desc=True).execute()
-        
-        if res.data:
-            snaps = []
-            for row in res.data:
-                try:
-                    parsed = json.loads(row['data'])
-                    name = parsed.get("save_name", "이름 없는 백업")
-                    dt_obj = datetime.fromtimestamp(row["month"], tz=timezone(timedelta(hours=9)))
-                    time_str = dt_obj.strftime('%H:%M') # 날짜는 달력에서 골랐으니 시간만 표시
-                    snaps.append({"id": row["month"], "name": f"[{time_str}] {name}"})
-                except: pass
-            return snaps
-        return []
-    except Exception as e:
-        st.sidebar.error(f"데이터 조회 중 오류: {e}")
-        return []
-
-def load_snapshot_data(snap_id):
-    try:
-        res = supabase.table("amber_snapshots").select("data").eq("month", snap_id).execute()
-        if res.data and len(res.data) > 0:
-            parsed = json.loads(res.data[0]['data'])
-            pms_df = pd.DataFrame()
-            if parsed.get('pms'):
-                import io
-                pms_df = pd.read_json(io.StringIO(parsed['pms']), orient='split')
-            sob_data = parsed.get('sob') or {}
-            avail_data = parsed.get('avail') or []
-            return pms_df, sob_data, avail_data
-    except Exception as e:
-        st.error(f"데이터 로드 에러: {e}")
-    return pd.DataFrame(), {}, []
-
-def export_comprehensive_report(data):
-    pdf = FPDF()
-    pdf.set_margins(left=20, top=20, right=20) 
-    pdf.add_page()
-    
-    pdf.set_fill_color(26, 42, 68) 
-    pdf.rect(0, 0, 210, 297, 'F')
-    pdf.set_fill_color(166, 138, 86) 
-    pdf.rect(0, 100, 210, 5, 'F')
-    
-    pdf.set_text_color(255, 255, 255)
-    pdf.set_font("helvetica", "B", 35)
-    pdf.set_xy(20, 120)
-    pdf.cell(0, 20, "STRATEGIC REVENUE", ln=True)
-    pdf.cell(0, 20, "ANALYSIS REPORT", ln=True)
-    
-    pdf.set_font("helvetica", "", 12)
-    pdf.ln(80)
-    pdf.cell(0, 10, f"TARGET PERIOD: 2026 / {data['month']}nd", ln=True, align='R')
-    pdf.cell(0, 10, f"PREPARED BY: S&M ARCHITECT JEON", ln=True, align='R')
-    pdf.cell(0, 10, f"REPORT DATE: {data['date']}", ln=True, align='R')
-
-    pdf.add_page()
-    pdf.set_text_color(26, 42, 68)
-    pdf.set_font("helvetica", "B", 20)
-    pdf.cell(0, 15, "01. KEY PERFORMANCE INDICATORS", ln=True)
-    pdf.set_fill_color(166, 138, 86)
-    pdf.rect(20, 35, 30, 2, 'F')
-    
-    pdf.ln(15)
-    
-    pdf.set_font("helvetica", "B", 12)
-    pdf.set_fill_color(240, 240, 240)
-    pdf.cell(60, 12, "METRIC", 1, 0, 'C', True)
-    pdf.cell(55, 12, "ACTUAL", 1, 0, 'C', True)
-    pdf.cell(55, 12, "ACHIEVEMENT", 1, 1, 'C', True)
-    
-    pdf.set_font("helvetica", "", 11)
-    pdf.cell(60, 12, "Gross Revenue", 1)
-    pdf.cell(55, 12, f"KRW {data['act_rev']:,.0f}", 1, 0, 'C')
-    pdf.cell(55, 12, f"{data['rev_pct']:.1f}%", 1, 1, 'C')
-    
-    pdf.cell(60, 12, "Average ADR", 1)
-    pdf.cell(55, 12, f"KRW {data['act_adr']:,.0f}", 1, 0, 'C')
-    pdf.cell(55, 12, f"{data['adr_diff']:+,}", 1, 1, 'C')
-
-    pdf.ln(15)
-
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "Performance vs Target Visualization", ln=True)
-    
-    pdf.set_font("helvetica", "", 10)
-    pdf.cell(0, 8, "Revenue Achievement Rate:", ln=True)
-    pdf.set_fill_color(230, 230, 230)
-    pdf.rect(20, pdf.get_y(), 170, 8, 'F')
-    bar_width = min(170, (data['rev_pct'] / 100) * 170)
-    pdf.set_fill_color(26, 42, 68) if data['rev_pct'] >= 100 else pdf.set_fill_color(158, 42, 43)
-    pdf.rect(20, pdf.get_y(), bar_width, 8, 'F')
-    pdf.ln(12)
-
-    pdf.cell(0, 8, "Room Nights Achievement Rate:", ln=True)
-    pdf.set_fill_color(230, 230, 230)
-    pdf.rect(20, pdf.get_y(), 170, 8, 'F')
-    bar_width_rn = min(170, (data['rn_pct'] / 100) * 170)
-    pdf.set_fill_color(166, 138, 86)
-    pdf.rect(20, pdf.get_y(), bar_width_rn, 8, 'F')
-    pdf.ln(20)
-
-    pdf.add_page()
-    pdf.set_font("helvetica", "B", 20)
-    pdf.cell(0, 15, "02. STRATEGIC INSIGHTS", ln=True)
-    pdf.set_fill_color(166, 138, 86)
-    pdf.rect(20, 35, 30, 2, 'F')
-    
-    pdf.ln(10)
-    
-    pdf.set_font("helvetica", "B", 14)
-    pdf.set_text_color(166, 138, 86)
-    pdf.cell(0, 10, "Yielding Profitability Analysis", ln=True)
-    
-    pdf.set_fill_color(248, 245, 240)
-    pdf.set_text_color(0, 0, 0)
-    pdf.set_font("helvetica", "", 12)
-    
-    insight_msg = (
-        f"By applying the 'Architect High-Tier Strategy' (ADR +{data['adj_adr']}%), "
-        f"it is analyzed that a net gain of KRW {data['gain']:,} could be realized. "
-        "This indicates a significant opportunity to shift from volume-driven "
-        "to value-driven sales, reducing variable costs by up to 15%."
-    )
-    pdf.multi_cell(w=pdf.epw, h=10, txt=insight_msg, border=1, fill=True)
-    
-    pdf.ln(20)
-    pdf.set_font("helvetica", "B", 14)
-    pdf.cell(0, 10, "Market & Action Plan", ln=True)
-    pdf.set_font("helvetica", "", 11)
-    
-    plans = [
-        f"- Target ADR: Maintenance of KRW {data['act_adr']*1.1:,.0f} for next weekend peak.",
-        "- Channel Mix: Reducing OTA dependency to increase Net RevPAR.",
-        "- Yielding: Immediate Tier-Up (+1) recommended for upcoming sold-out dates."
-    ]
-    for plan in plans:
-        pdf.cell(0, 8, plan, ln=True)
-
-    pdf.set_y(275)
-    pdf.set_font("helvetica", "I", 8)
-    pdf.set_text_color(150, 150, 150)
-    pdf.cell(0, 10, "CONFIDENTIAL | AMBER PURE HILL STRATEGY", 0, 0, 'C')
-
-    return bytes(pdf.output())
-
-def clean_numeric(val):
-    if val is None: return 0.0
-    if isinstance(val, pd.Series): val = val.iloc[-1] 
-    if pd.isna(val): return 0.0
-    try:
-        s_val = str(val).replace(',', '').replace('%', '').replace('₩', '').strip()
-        if s_val.lower() in ['', '-', 'nan', 'none', 'null']: return 0.0
-        return float(s_val)
-    except:
-        return 0.0
-
-def deduplicate_columns(cols):
-    new_cols = []; seen = {}
-    for c in cols:
-        c_str = str(c).strip()
-        if c_str in seen:
-            seen[c_str] += 1
-            new_cols.append(f"{c_str}_{seen[c_str]}")
-        else:
-            seen[c_str] = 0
-            new_cols.append(c_str)
-    return new_cols
-
-def find_column(df, keywords):
-    if df is None or df.empty: return None
-    matched_cols = []
-    for col in df.columns:
-        clean_col = str(col).replace(' ', '').replace('\n', '').replace('\r', '')
-        for kw in keywords:
-            if kw in clean_col:
-                matched_cols.append(col)
-    return matched_cols[-1] if matched_cols else None
-
-def extract_date_from_avail(df, file_name):
-    try:
-        top_text = df.iloc[:5].astype(str).apply(lambda x: ' '.join(x), axis=1).str.cat(sep=' ')
-        match = re.search(r'시작일자\s*:\s*(\d{4}-\d{2}-\d{2})', top_text)
-        if match: return datetime.strptime(match.group(1), '%Y-%m-%d')
     except: pass
-    
-    name_match = re.search(r'(\d{8})', str(file_name))
-    if name_match:
-        try: return datetime.strptime(name_match.group(1), '%Y%m%d')
-        except: pass
-    return datetime.now()
 
-# ==========================================
-# 🌟 글로벌 변수 및 시즌/티어 정밀 룰 세팅 🌟
-# ==========================================
-TARGET_DATA = {
-    1:  {"rn": 2270, "adr": 226869, "occ": 56.3, "rev": 514992575},
-    2:  {"rn": 2577, "adr": 305227, "occ": 70.8, "rev": 786570856},
-    3:  {"rn": 2248, "adr": 235587, "occ": 55.8, "rev": 529599040},
-    4:  {"rn": 2414, "adr": 288049, "occ": 61.9, "rev": 695351004},
-    5:  {"rn": 3082, "adr": 293220, "occ": 76.5, "rev": 903705440},
-    6:  {"rn": 2776, "adr": 291140, "occ": 71.2, "rev": 808203820},
-    7:  {"rn": 3671, "adr": 335590, "occ": 91.1, "rev": 1231949142},
-    8:  {"rn": 3873, "adr": 358476, "occ": 96.1, "rev": 1388376999},
-    9:  {"rn": 2932, "adr": 324752, "occ": 75.2, "rev": 952171506},
-    10: {"rn": 3009, "adr": 298163, "occ": 74.7, "rev": 897171539},
-    11: {"rn": 2402, "adr": 277746, "occ": 61.6, "rev": 667146771},
-    12: {"rn": 2765, "adr": 290788, "occ": 68.6, "rev": 804030110}
-}
-BUDGET_DATA = {m: TARGET_DATA[m]["rev"] for m in range(1, 13)}
-TOTAL_ROOM_CAPACITY = 131
-
-WEEKDAYS_KR = ['월', '화', '수', '목', '금', '토', '일']
-DYNAMIC_ROOMS = ["FDB", "FDE", "HDP", "HDT", "HDF"]
-FIXED_ROOMS = ["GDB", "GDF", "FFD", "FPT", "PPV"]
-ALL_ROOMS = DYNAMIC_ROOMS + FIXED_ROOMS
-
-PRICE_TABLE = {
-    "FDB": {"BAR0": 802000, "BAR8": 315000, "BAR7": 353000, "BAR6": 396000, "BAR5": 445000, "BAR4": 502000, "BAR3": 567000, "BAR2": 642000, "BAR1": 728000},
-    "FDE": {"BAR0": 839000, "BAR8": 352000, "BAR7": 390000, "BAR6": 433000, "BAR5": 482000, "BAR4": 539000, "BAR3": 604000, "BAR2": 679000, "BAR1": 765000},
-    "HDP": {"BAR0": 759000, "BAR8": 280000, "BAR7": 318000, "BAR6": 361000, "BAR5": 410000, "BAR4": 467000, "BAR3": 532000, "BAR2": 607000, "BAR1": 693000},
-    "HDT": {"BAR0": 729000, "BAR8": 250000, "BAR7": 288000, "BAR6": 331000, "BAR5": 380000, "BAR4": 437000, "BAR3": 502000, "BAR2": 577000, "BAR1": 663000},
-    "HDF": {"BAR0": 916000, "BAR8": 420000, "BAR7": 458000, "BAR6": 501000, "BAR5": 550000, "BAR4": 607000, "BAR3": 672000, "BAR2": 747000, "BAR1": 833000},
-}
-
-FIXED_PRICE_TABLE = {
-    "GDB": {"UND1": 298000, "UND2": 298000, "MID1": 298000, "MID2": 298000, "UPP1": 298000, "UPP2": 298000, "UPP3":298000},
-    "GDF": {"UND1": 375000, "UND2": 410000, "MID1": 410000, "MID2": 488000, "UPP1": 488000, "UPP2": 578000, "UPP3":678000},
-    "FFD": {"UND1": 353000, "UND2": 393000, "MID1": 433000, "MID2": 482000, "UPP1": 539000, "UPP2": 604000, "UPP3":704000},
-    "FPT": {"UND1": 500000, "UND2": 550000, "MID1": 600000, "MID2": 650000, "UPP1": 700000, "UPP2": 750000, "UPP3":850000},
-    "PPV": {"UND1": 1104000, "UND2": 1154000, "MID1": 1154000, "MID2": 1304000, "UPP1": 1304000, "UPP2": 1554000, "UPP3":1704000},
-}
-
-FIXED_BAR0_TABLE = {"GDB": 298000, "GDF": 678000, "FFD": 704000, "FPT": 850000, "PPV": 1704000}
-
-def get_season_details(date_obj):
-    if isinstance(date_obj, str):
-        try: date_obj = datetime.strptime(date_obj[:10], '%Y-%m-%d')
-        except: date_obj = datetime.now()
-        
-    m, d = date_obj.month, date_obj.day
-    md = f"{m:02d}.{d:02d}"
-    actual_is_weekend = date_obj.weekday() in [4, 5]
-    
-    if ("02.13" <= md <= "02.18") or ("09.23" <= md <= "09.28"):
-        season, is_weekend = "UPP", True
-    elif ("12.21" <= md <= "12.31") or ("10.01" <= md <= "10.08"):
-        season, is_weekend = "UPP", False
-    elif ("05.03" <= md <= "05.05") or ("05.24" <= md <= "05.26") or ("06.05" <= md <= "06.07"):
-        season, is_weekend = "MID", True
-    elif "07.17" <= md <= "08.29":
-        season, is_weekend = "UPP", actual_is_weekend
-    elif ("01.04" <= md <= "03.31") or ("11.01" <= md <= "12.20"):
-        season, is_weekend = "UND", actual_is_weekend
+# 2) 호텔 DB 앱
+try:
+    app_hotel = firebase_admin.get_app("hotel_app")
+except ValueError:
+    if "firebase" in st.secrets:
+        cred_h = credentials.Certificate(dict(st.secrets["firebase"]))
+        app_hotel = firebase_admin.initialize_app(cred_h, name="hotel_app")
     else:
-        season, is_weekend = "MID", actual_is_weekend
-        
-    type_code = f"{season}{'2' if is_weekend else '1'}"
-    return type_code, season, is_weekend
+        app_hotel = None
+db_hotel = firestore.client(app=app_hotel) if app_hotel else None
 
-def determine_bar(season, is_weekend, occ):
-    if season == "UPP":
-        if is_weekend:
-            if occ >= 81: return "BAR1"
-            elif occ >= 51: return "BAR2"
-            elif occ >= 31: return "BAR3"
-            else: return "BAR4"
-        else:
-            if occ >= 81: return "BAR2"
-            elif occ >= 51: return "BAR3"
-            elif occ >= 31: return "BAR4"
-            else: return "BAR5"
-    elif season == "MID":
-        if is_weekend:
-            if occ >= 81: return "BAR3"
-            elif occ >= 51: return "BAR4"
-            elif occ >= 31: return "BAR5"
-            else: return "BAR6"
-        else:
-            if occ >= 81: return "BAR4"
-            elif occ >= 51: return "BAR5"
-            elif occ >= 31: return "BAR6"
-            else: return "BAR7"
-    else: 
-        if is_weekend:
-            if occ >= 81: return "BAR4"
-            elif occ >= 51: return "BAR5"
-            elif occ >= 31: return "BAR6"
-            else: return "BAR7"
-        else:
-            if occ >= 81: return "BAR5"
-            elif occ >= 51: return "BAR6"
-            elif occ >= 31: return "BAR7"
-            else: return "BAR8"
+# 3) 항공/전략 DB 앱
+try:
+    app_flight = firebase_admin.get_app("flight_app")
+except ValueError:
+    if "firebase_flight" in st.secrets:
+        secret_dict = dict(st.secrets["firebase_flight"])
+        if "private_key" in secret_dict:
+            secret_dict["private_key"] = secret_dict["private_key"].replace("\\n", "\n")
+        cred_f = credentials.Certificate(secret_dict)
+        app_flight = firebase_admin.initialize_app(cred_f, name="flight_app")
+    else:
+        app_flight = None
+db_flight = firestore.client(app=app_flight) if app_flight else None
 
-def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
-    type_code, season, is_weekend = get_season_details(date_obj)
-    try: current_avail = float(avail) if pd.notna(avail) else 0.0
-    except: current_avail = 0.0
-    occ = ((total - current_avail) / total * 100) if total > 0 else 0
+
+# =========================================================================
+# 3. 데이터 로딩 함수 정의 
+# =========================================================================
+@st.cache_data(ttl=600)
+def parse_uploaded_files(files):
+    if not files: return pd.DataFrame()
+    all_data = []
+    for file in files:
+        try:
+            if file.name.endswith('.csv'): df = pd.read_csv(file, header=3) 
+            else: df = pd.read_excel(file, header=3)
+            
+            df.columns = [str(c).strip() for c in df.columns]
+            rev_cols = [c for c in df.columns if '매출' in c]
+            date_cols = [c for c in df.columns if '일자' in c]
+            
+            if not rev_cols or not date_cols: continue
+            
+            target_date = date_cols[0]
+            target_rev = rev_cols[-1]
+            
+            room_cols = [c for c in df.columns if '객실수' in c or '판매객실' in c]
+            target_room = room_cols[-1] if room_cols else None
+            
+            cols_to_use = [target_date, target_rev]
+            if target_room: cols_to_use.append(target_room)
+            
+            temp = df[cols_to_use].copy()
+            new_cols = ['date', 'otb_revenue']
+            if target_room: new_cols.append('rooms_sold')
+            temp.columns = new_cols
+            
+            temp = temp[~temp['date'].astype(str).str.replace(' ','').str.contains('소계|합계|총합계|Total|Subtotal', case=False, na=False)]
+            temp['date'] = pd.to_datetime(temp['date'], errors='coerce')
+            temp = temp.dropna(subset=['date']) 
+            
+            if not temp.empty:
+                temp['date'] = temp['date'].dt.tz_localize(None).dt.normalize()
+                for col in ['otb_revenue', 'rooms_sold']:
+                    if col in temp.columns:
+                        if temp[col].dtype == object:
+                            temp[col] = temp[col].astype(str).str.replace(',', '').str.replace(' ', '')
+                        temp[col] = pd.to_numeric(temp[col], errors='coerce').fillna(0)
+                if 'rooms_sold' not in temp.columns: temp['rooms_sold'] = 0
+                all_data.append(temp)
+        except: continue
     
-    if manual_bar:
-        bar = manual_bar
-        if bar == "BAR0":
-            if room_id in DYNAMIC_ROOMS: price = PRICE_TABLE.get(room_id, {}).get("BAR0", 0)
-            else: price = FIXED_BAR0_TABLE.get(room_id, 0)
-        else:
-            if room_id in DYNAMIC_ROOMS: price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
-            else: price = FIXED_PRICE_TABLE.get(room_id, {}).get(bar, 0)
-        return occ, bar, price, True 
+    if all_data:
+        final_df = pd.concat(all_data).sort_values('date').reset_index(drop=True)
+        return final_df.drop_duplicates(subset=['date'], keep='last')
+    return pd.DataFrame()
 
-    if room_id in DYNAMIC_ROOMS:
-        bar = determine_bar(season, is_weekend, occ)
-        price = PRICE_TABLE.get(room_id, {}).get(bar, 0)
-    else:
-        bar = type_code
-        price = FIXED_PRICE_TABLE.get(room_id, {}).get(type_code, 0)
-    return occ, bar, price, False 
-
-def get_dynamic_bar_tier(occ, date_str):
-    type_code, season, is_weekend = get_season_details(date_str)
-    return determine_bar(season, is_weekend, occ)
-
-def robust_read_all_sheets(file):
-    dfs = []
+@st.cache_data(ttl=600)
+def get_flight_data_only():
     try:
-        if file.name.endswith('.csv'):
-            try: dfs.append(pd.read_csv(file, encoding='cp949', header=None))
-            except: dfs.append(pd.read_csv(file, encoding='utf-8-sig', header=None))
-        else:
-            engine = 'xlrd' if file.name.endswith('.xls') else 'openpyxl'
-            xls = pd.ExcelFile(file, engine=engine)
-            for sn in xls.sheet_names:
-                dfs.append(pd.read_excel(xls, sheet_name=sn, header=None))
-    except Exception as e:
-        st.sidebar.error(f"❌ '{file.name}' 로드 실패: {e}")
-    return dfs
+        if not db_flight: return pd.DataFrame()
+        docs = db_flight.collection('flight_prices').stream()
+        data = [d.to_dict() for d in docs]
+        df = pd.DataFrame(data)
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if 'search_date_str' in df.columns: df['search_date_str'] = df['search_date_str'].fillna('').astype(str)
+            else: df['search_date_str'] = 'unknown'
+            return df.sort_values('date')
+        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-def get_smart_corridor(total_goal, dates, demand_index):
-    day_weights = [1.0, 1.0, 1.0, 1.0, 1.8, 2.2, 1.2]
-    adj_weights = [day_weights[d.weekday()] * demand_index for d in dates]
-    total_w = sum(adj_weights)
-    if total_w == 0: return np.zeros(len(dates)), np.zeros(len(dates)), np.zeros(len(dates))
-    base = (np.cumsum(adj_weights) / total_w) * total_goal
-    return base, base * 1.05, base * 0.95
-
-def get_booking_curve(total_goal, lead_days, demand_idx):
-    days = np.arange(-lead_days, 1)
-    z = (days + (30 / demand_idx)) / 15
-    s_curve = 1 / (1 + np.exp(-z))
-    s_curve = (s_curve - s_curve.min()) / (s_curve.max() - s_curve.min())
-    return days, s_curve * total_goal
-
-# ==========================================
-# 🌟 세션 및 초기 변수 세팅
-# ==========================================
-if 'oracle_loaded_snap' not in st.session_state:
-    st.session_state['oracle_loaded_snap'] = None
-
-# 💡 [핵심 패치] 파일 업로더 메모리 강제 초기화를 위한 고유 키
-if 'oracle_file_key' not in st.session_state:
-    st.session_state['oracle_file_key'] = 0
-
-yearly_data_store = {m: {"rev": 0.0, "occ": 0.0, "rn": 0.0, "adr": 0.0} for m in range(1, 13)}
-df_full_pms = pd.DataFrame()
-real_room_df = None
-real_channel_df = None
-actual_pace = []
-actual_curve = []
-avail_analysis = []
-
-# ==========================================
-# 사이드바 (상단)
-# ==========================================
-st.sidebar.title("🧬 Oracle Intelligence v5.5")
-selected_month = st.sidebar.selectbox("🎯 분석 타겟 월 선택", range(1, 13), index=3)
-demand_idx = st.sidebar.slider("시장 수요 지수 보정", 0.5, 2.0, 1.3)
-
-st.sidebar.markdown("---")
-st.sidebar.subheader("📂 전략 데이터 업로드 센터")
-
-# 💡 [핵심 패치] key 속성에 file_key를 부여하여, 언제든 메모리를 폭파시킬 수 있게 만듦
-pms_files = st.sidebar.file_uploader("PMS 상세 리스트 (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"pms_{st.session_state['oracle_file_key']}")
-sob_files = st.sidebar.file_uploader("영업 현황 SOB (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"sob_{st.session_state['oracle_file_key']}")
-avail_files = st.sidebar.file_uploader("사용 가능 객실 현황 (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"avail_{st.session_state['oracle_file_key']}")
-
-# ==========================================
-# 데이터 파싱 (업로드 vs 클라우드 스냅샷 우선순위 병합)
-# ==========================================
-if st.session_state['oracle_loaded_snap'] is not None:
-    st.sidebar.success("☁️ 클라우드 타임머신 모드 작동 중! (새 파일을 올리면 최신 데이터로 덮어씁니다)")
-    df_full_pms = st.session_state['oracle_loaded_snap']['pms'].copy() if not st.session_state['oracle_loaded_snap']['pms'].empty else pd.DataFrame()
-    cloud_sob = st.session_state['oracle_loaded_snap']['sob']
-    for k, v in cloud_sob.items():
-        if str(k).isdigit():
-            yearly_data_store[int(k)] = v
-    avail_analysis = st.session_state['oracle_loaded_snap']['avail']
-
-# 1. SOB 데이터 처리 (스냅샷이 있든 없든 새 파일이 우선)
-if sob_files:
+@st.cache_data(ttl=600)
+def get_comp_data_only():
     try:
-        for f in sob_files:
-            dfs = robust_read_all_sheets(f)
-            for df_full in dfs:
-                if df_full.empty: continue
-                header_idx = -1
-                for i in range(min(20, len(df_full))):
-                    row_str = str(df_full.iloc[i].values).replace(' ', '')
-                    if ('일자' in row_str or '날짜' in row_str) and ('매출' in row_str or '점유율' in row_str):
-                        header_idx = i; break
-                
-                if header_idx != -1:
-                    df_data = df_full.iloc[header_idx+1:].copy()
-                    df_data.columns = deduplicate_columns(df_full.iloc[header_idx].values)
-                    c_date = find_column(df_data, ['일자', '날짜', 'Date'])
-                    c_occ = find_column(df_data, ['점유율', 'Occ'])
-                    c_rev = find_column(df_data, ['매출', 'Revenue']) 
-                    c_rn = find_column(df_data, ['객실수', 'RN']) 
-                    c_adr = find_column(df_data, ['객단가', 'ADR']) 
-                    
-                    if c_date and c_rev:
-                        f_m = None
-                        for val in df_data[c_date].astype(str):
-                            match = re.match(r'202\d-(\d{2})-\d{2}', val)
-                            if match: f_m = int(match.group(1)); break
-                        
-                        if f_m:
-                            df_clean = df_data.dropna(subset=[c_date], how='all')
-                            sum_rows = df_clean[df_clean[c_date].astype(str).str.contains('합계|총계|Total', na=False)]
-                            target_row = None
-                            if not sum_rows.empty: target_row = sum_rows.iloc[-1]
-                            else:
-                                for idx in range(len(df_clean)-1, -1, -1):
-                                    if clean_numeric(df_clean.iloc[idx][c_rev]) > 0:
-                                        target_row = df_clean.iloc[idx]; break
-                                        
-                            if target_row is not None:
-                                rev_val = clean_numeric(target_row[c_rev])
-                                occ_val = clean_numeric(target_row[c_occ]) if c_occ else 0.0
-                                rn_val = clean_numeric(target_row[c_rn]) if c_rn else 0.0
-                                adr_val = clean_numeric(target_row[c_adr]) if c_adr else (rev_val/rn_val if rn_val>0 else 0)
+        if not db_flight: return pd.DataFrame()
+        docs = db_flight.collection('hotel_comp_prices').stream()
+        data = [d.to_dict() for d in docs]
+        df = pd.DataFrame(data)
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if 'search_date_str' in df.columns: df['search_date_str'] = df['search_date_str'].fillna('').astype(str)
+            return df.sort_values('date')
+        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-                                if rev_val > yearly_data_store[f_m]['rev']:
-                                    yearly_data_store[f_m] = {"rev": rev_val, "occ": occ_val, "rn": rn_val, "adr": adr_val}
-        st.sidebar.success("✅ 최신 SOB 데이터로 업데이트 완료")
-    except Exception as e: st.sidebar.error(f"SOB 처리 실패: {e}")
-
-# 2. 객실 가용(Avail) 데이터 처리
-if avail_files:
+@st.cache_data(ttl=600)
+def get_rent_data_only():
     try:
-        avail_history = []
-        for f in avail_files:
-            dfs = robust_read_all_sheets(f)
-            for df_a in dfs:
-                if df_a.empty: continue
-                up_date = extract_date_from_avail(df_a, f.name)
-                type_idx = -1
-                for i in range(min(15, len(df_a))):
-                    if '객실타입' in str(df_a.iloc[i].values).replace(' ', ''):
-                        type_idx = i; break
-                
-                if type_idx != -1:
-                    d_headers = df_a.iloc[type_idx - 1].values[2:]
-                    for i in range(type_idx + 1, len(df_a)):
-                        r_type = str(df_a.iloc[i, 0]).strip()
-                        if pd.isna(r_type) or r_type in ['nan', '합계', '예약객실', 'None', '']: continue
-                        max_cap = clean_numeric(df_a.iloc[i, 1])
-                        for j, d_str in enumerate(d_headers):
-                            if pd.isna(d_str) or str(d_str).strip() in ['', 'nan']: continue
-                            rem_val = clean_numeric(df_a.iloc[i, 2+j])
-                            occ_val = ((max_cap - rem_val) / max_cap * 100) if max_cap > 0 else 0
-                            clean_date = str(d_str).replace('.0', '').strip()
-                            avail_history.append({"update_at": up_date, "date": f"2026-{clean_date}", "type": r_type, "occ": occ_val})
-        
-        df_h = pd.DataFrame(avail_history)
-        if not df_h.empty:
-            updates = sorted(df_h['update_at'].unique())
-            if len(updates) >= 2:
-                l_up, p_up = updates[-1], updates[-2]
-                df_l, df_p = df_h[df_h['update_at'] == l_up], df_h[df_h['update_at'] == p_up]
-                merged = pd.merge(df_l, df_p, on=['date', 'type'], suffixes=('_new', '_old'))
-                merged['velocity'] = merged['occ_new'] - merged['occ_old']
-                merged['suggested_tier'] = merged.apply(lambda row: get_dynamic_bar_tier(row['occ_new'], row['date']), axis=1)
-                avail_analysis = merged[merged['velocity'] != 0].to_dict('records')
-                st.sidebar.success("✅ 최신 재고 가속도 업데이트 완료")
-    except Exception as e: st.sidebar.error(f"재고 분석 에러: {e}")
+        if not db_flight: return pd.DataFrame()
+        docs = db_flight.collection('rental_prices').stream()
+        data = [d.to_dict() for d in docs]
+        df = pd.DataFrame(data)
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if 'search_date_str' in df.columns: df['search_date_str'] = df['search_date_str'].fillna('').astype(str)
+            return df.sort_values('date')
+        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-# ======================================================================
-# 🚀 [아키텍트 엔진 v6.9] PMS 증분 병합 (객실수 분할 단가 산출 및 원자적 팽창)
-# ======================================================================
-if pms_files:
+@st.cache_data(ttl=3600)
+def get_tourist_data_only():
     try:
-        new_pms_list = []
-        for f in pms_files:
-            try:
-                raw = pd.read_csv(f, encoding='cp949', header=None) if f.name.endswith('.csv') else pd.read_excel(f, header=None)
-                h_idx = -1
-                for i in range(min(25, len(raw))):
-                    if '입실일자' in "".join([str(x) for x in raw.iloc[i].values]):
-                        h_idx = i; break
-                if h_idx != -1:
-                    df_d = raw.iloc[h_idx+1:].copy()
-                    df_d.columns = deduplicate_columns(raw.iloc[h_idx].values)
-                    new_pms_list.append(df_d)
-            except: pass
-    
-        if new_pms_list:
-            new_v_df = pd.concat(new_pms_list, ignore_index=True)
-            
-            st_col = find_column(new_v_df, ['상태', 'Status'])
-            if st_col:
-                new_v_df = new_v_df[~new_v_df[st_col].astype(str).str.contains('RC|취소|Cancel|NoShow', case=False, na=False)]
-            
-            c_in = find_column(new_v_df, ['입실일자', '체크인'])
-            c_rn = find_column(new_v_df, ['박수', '숙박일수', 'RN'])
-            c_rooms = find_column(new_v_df, ['객실수', 'RoomCount'])
-            c_room_rev = find_column(new_v_df, ['객실료', '객실매출'])
-            c_tp = find_column(new_v_df, ['객실타입', 'RoomType'])
-            c_id = find_column(new_v_df, ['예약번호', 'ConfNo', 'No', '예약번호 '])
-            c_bk = find_column(new_v_df, ['예약일자', '예약일'])
+        if not db_flight: return pd.DataFrame()
+        docs = db_flight.collection('tourist_arrivals').stream()
+        data = [d.to_dict() for d in docs]
+        df = pd.DataFrame(data)
+        if not df.empty and 'date' in df.columns:
+            df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            return df.sort_values('date')
+        return pd.DataFrame()
+    except: return pd.DataFrame()
 
-            new_v_df['Temp_In'] = pd.to_datetime(new_v_df[c_in], errors='coerce')
-            new_v_df['Val_Nights'] = pd.to_numeric(new_v_df[c_rn].astype(str).str.extract(r'(\d+)')[0], errors='coerce').fillna(1).astype(int)
-            new_v_df['Val_Rooms'] = pd.to_numeric(new_v_df[c_rooms].astype(str).str.extract(r'(\d+)')[0], errors='coerce').fillna(1).astype(int) if c_rooms else 1
-            new_v_df['Rate_Per_Night'] = pd.to_numeric(new_v_df[c_room_rev].astype(str).str.replace(r'[^-0-9.]', '', regex=True), errors='coerce').fillna(0)
-            
-            if c_bk: new_v_df['Temp_Bk'] = pd.to_datetime(new_v_df[c_bk], errors='coerce')
-            else: new_v_df['Temp_Bk'] = new_v_df['Temp_In'] - pd.Timedelta(days=1)
-            new_v_df['Temp_Bk'] = new_v_df['Temp_Bk'].fillna(new_v_df['Temp_In'] - pd.Timedelta(days=1))
-
-            new_v_df = new_v_df.dropna(subset=['Temp_In', c_tp])
-
-            # 💡 [핵심 교정] 단가 분할 및 다중 팽창 로직
-            def expand_v69(row):
-                # 1. N열 총액을 객실수로 나누어 "1객실당 1박 순수 단가" 산출
-                unit_daily_rev = row['Rate_Per_Night'] / row['Val_Rooms'] if row['Val_Rooms'] > 0 else 0
-                res_id = str(row[c_id]).strip() if c_id and pd.notna(row[c_id]) else f"{row[c_tp]}_{row['Rate_Per_Night']}"
-                
-                rows = []
-                # 2. 박수만큼 날짜 생성
-                for n in range(row['Val_Nights']):
-                    current_date = row['Temp_In'] + pd.Timedelta(days=n)
-                    # 3. 해당 날짜에 "객실수"만큼의 행(Row)을 개별 생성
-                    for r in range(row['Val_Rooms']):
-                        rows.append({
-                            'Stay_Date': current_date,
-                            'Daily_Rev': unit_daily_rev,  # 쪼개진 1객실 단가 적용
-                            'Daily_RN': 1.0,              # 무조건 1박은 1.0
-                            '객실타입': row[c_tp],
-                            'Temp_In': row['Temp_In'],
-                            'Temp_Bk': row['Temp_Bk'],
-                            # 💡 중복 제거에 날아가지 않도록 끝에 방 번호(R0, R1...) 부여
-                            'Unique_Key': f"{res_id}_{current_date.strftime('%Y%m%d')}_R{r}"
-                        })
-                return rows
-            
-            new_expanded = pd.DataFrame([item for sublist in new_v_df.apply(expand_v69, axis=1) for item in sublist])
-            
-            if not df_full_pms.empty:
-                if 'Unique_Key' not in df_full_pms.columns:
-                    df_full_pms['Unique_Key'] = df_full_pms['객실타입'] + "_" + df_full_pms['Stay_Date'].astype(str)
-                combined_pms = pd.concat([df_full_pms, new_expanded], ignore_index=True)
-            else:
-                combined_pms = new_expanded
-
-            df_full_pms = combined_pms.drop_duplicates(subset=['Unique_Key'], keep='last').reset_index(drop=True)
-
-            st.sidebar.success(f"✅ PMS 증분 업데이트 완료: 총 {len(df_full_pms):,} RN 원자적 분해 완료")
-
-    except Exception as e:
-        st.sidebar.error(f"PMS 분석 오류: {e}")
-        
-# ==========================================
-# 공통 지표 연산 (마스터 PMS & SOB 동기화)
-# ==========================================
-if not df_full_pms.empty:
-    # 💡 [치명적 에러 방지] 클라우드(JSON)에서 불러와 문자열로 강등된 날짜 데이터를 Datetime 객체로 강제 복원
-    for col in ['Stay_Date', 'Temp_Bk', 'Temp_In', 'Temp_Out']:
-        if col in df_full_pms.columns:
-            df_full_pms[col] = pd.to_datetime(df_full_pms[col], errors='coerce')
-
+@st.cache_data(ttl=600)
+def get_db_bookings_only():
     try:
-        c_tp = find_column(df_full_pms, ['객실타입', 'RoomType'])
-        c_path = find_column(df_full_pms, ['예약경로', 'Source'])
-        
-        num_d = calendar.monthrange(2026, selected_month)[1]
-        t_dates_m = pd.date_range(start=f"2026-{selected_month:02d}-01", end=f"2026-{selected_month:02d}-{num_d}")
-        
-        target_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
-        
-        if not target_df.empty:
-            daily_r = target_df.groupby('Stay_Date')['Daily_Rev'].sum().reset_index()
-            acc = 0.0; temp_p = []
-            for d in t_dates_m:
-                acc += daily_r[daily_r['Stay_Date'] == d]['Daily_Rev'].sum() / 100000000
-                temp_p.append(acc)
-            actual_pace = temp_p
-            
-            target_df['LeadTime'] = (target_df['Stay_Date'] - target_df['Temp_Bk']).dt.days
-            actual_curve = [target_df[target_df['LeadTime'] >= -d]['Daily_Rev'].sum() / 100000000 for d in np.arange(-90, 1)]
-            
-            # 객실 감사 탭용 집계 (팽창된 데이터를 1박 단위로 정밀 합산)
-            if c_tp:
-                # 💡 Daily_Rev와 Daily_RN은 이미 1박 단위로 쪼개져 있으므로 단순 합계(sum)가 정답입니다.
-                real_room_df = target_df.groupby(c_tp).agg({
-                    'Daily_Rev': 'sum', 
-                    'Daily_RN': 'sum'
-                }).reset_index()
-                
-                # ADR 재계산
-                real_room_df['평균 ADR'] = (real_room_df['Daily_Rev'] / real_room_df['Daily_RN']).fillna(0)
-                
-                # 컬럼명 정리
-                real_room_df.rename(columns={
-                    c_tp: '객실타입', 
-                    'Daily_Rev': '총 객실매출', 
-                    'Daily_RN': '판매 객실수(RN)'
-                }, inplace=True)
-            
-            if c_path:
-                real_channel_df = target_df.groupby(c_path)['Daily_Rev'].sum().reset_index()
+        if not db_hotel: return pd.DataFrame()
+        docs = db_hotel.collection('hotel_bookings').stream()
+        data = [d.to_dict() for d in docs]
+        df = pd.DataFrame(data)
+        if not df.empty:
+            if '입실일자' in df.columns: df['입실일자'] = pd.to_datetime(df['입실일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if '접수일자' in df.columns: df['접수일자'] = pd.to_datetime(df['접수일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if '총금액' in df.columns: df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        return df
+    except: return pd.DataFrame()
 
-    except Exception as e: 
-        pass
-
-# ==========================================
-# 사이드바 (하단) - 클라우드 타임머신 및 초기화
-# ==========================================
-st.sidebar.markdown("---")
-st.sidebar.subheader("☁️ 글로벌 클라우드 백업")
-
-snap_name = st.sidebar.text_input("💾 데이터 백업 이름", value=f"{datetime.now(timezone(timedelta(hours=9))).strftime('%m/%d %H:%M')} 마스터 백업")
-if st.sidebar.button("📤 현재 전체 데이터를 클라우드에 백업", use_container_width=True):
-    if not df_full_pms.empty or any(v['rev'] > 0 for v in yearly_data_store.values()):
-        save_to_cloud(snap_name, df_full_pms, yearly_data_store, avail_analysis)
-    else:
-        st.sidebar.warning("저장할 데이터가 없습니다.")
-
-# 💡 [핵심 패치] 접었다 펼 수 있는 관리 및 초기화 메뉴
-with st.sidebar.expander("📥 과거 백업 관리 및 시스템 초기화", expanded=False):
-    pick_date = st.date_input("조회/삭제할 백업 날짜 선택", value=datetime.now(timezone(timedelta(hours=9))))
-    snaps_today = get_snapshots_by_date(pick_date)
-
-    if snaps_today:
-        snap_opts = {s['id']: s['name'] for s in snaps_today}
-        sel_snap_id = st.selectbox("해당 날짜의 백업 시점 선택", options=list(snap_opts.keys()), format_func=lambda x: snap_opts[x])
-        
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("🔄 백업 불러오기", use_container_width=True):
-                pms_c, sob_c, avail_c = load_snapshot_data(sel_snap_id)
-                st.session_state['oracle_loaded_snap'] = {'pms': pms_c, 'sob': sob_c, 'avail': avail_c}
-                st.rerun()
-        with c2:
-            # 1. 특정한 날짜(백업)만 DB에서 완전히 삭제하는 기능
-            if st.button("🗑️ 이 백업만 삭제", use_container_width=True):
-                try:
-                    supabase.table("amber_snapshots").delete().eq("month", sel_snap_id).execute()
-                    st.success("클라우드에서 해당 백업이 영구 삭제되었습니다.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"삭제 실패: {e}")
-    else:
-        st.info(f"📅 {pick_date.strftime('%Y-%m-%d')}에는 저장된 백업이 없습니다.")
-
+# =========================================================================
+# 4. 메인 UI 렌더링 시작
+# =========================================================================
+if check_password():
+    st.title("🚀 2026 비상: 시크릿 전략 페이지")
     st.markdown("---")
-    # 2. 업로드된 파일과 화면을 싹 다 날려버리는 무적의 초기화 버튼
-    if st.button("🧨 시스템 완전 초기화 (모든 데이터 리셋)", use_container_width=True):
-        st.session_state['oracle_loaded_snap'] = None
-        st.session_state['oracle_file_key'] += 1  # 💡 파일 업로더의 키를 변경하여 기존 캐시를 완전히 날림
-        st.rerun()
 
-
-with st.sidebar.expander("📊 2026년 마스터 타겟 보드 (항시 열람)", expanded=False):
-    tgt_df = pd.DataFrame.from_dict(TARGET_DATA, orient='index')
-    tgt_df.index.name = '월'
-    tgt_df.rename(columns={'rn': '목표 RN', 'adr': '목표 ADR', 'occ': '목표 OCC(%)', 'rev': '목표 매출'}, inplace=True)
-    tgt_df.loc['합계'] = [27117, 375346, 55.7, 10179268802]
-    
-    styled_tgt = tgt_df.style.format({
-        '목표 RN': '{:,.0f}',
-        '목표 ADR': '{:,.0f}',
-        '목표 OCC(%)': '{:,.1f}',
-        '목표 매출': '{:,.0f}'
-    })
-    st.dataframe(styled_tgt, use_container_width=True)
-
-# 🚨 상단 지표 하드코딩 OTB 동기화
-FACT_DB_GLOBAL = {
-    4: {1: 666606568, 2: 680240552, 3: 683484877, 6: 706396340, 7: 713650569, 8: 725514271, 9: 732471320, 10: 729130460, 13: 752906651},
-    5: {1: 580174512, 2: 584284522, 3: 589896496, 6: 604640008, 7: 617226508, 8: 630307581, 9: 638878045, 10: 646880667, 13: 677498662},
-    6: {1: 317608189, 2: 323004791, 3: 325341332, 6: 329998237, 7: 336899555, 8: 354565622, 9: 355016508, 10: 357755106, 13: 360980571}
-}
-for m_fact in FACT_DB_GLOBAL:
-    if m_fact in FACT_DB_GLOBAL and FACT_DB_GLOBAL[m_fact]:
-        max_v = max(FACT_DB_GLOBAL[m_fact].values())
-        if max_v > yearly_data_store[m_fact]['rev']:
-            yearly_data_store[m_fact]['rev'] = max_v
-
-# ==========================================
-# 4. 메인 대시보드 화면 구성
-# ==========================================
-cur_data = yearly_data_store[selected_month]
-current_rev_total = cur_data['rev']
-current_occ_pct = cur_data['occ']
-current_rn_total = cur_data['rn']
-current_adr_actual = cur_data['adr']
-
-if current_rev_total == 0 and not df_full_pms.empty:
-    try:
-        m_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month]
-        if not m_df.empty:
-            current_rev_total = float(m_df['Daily_Rev'].sum())
-            current_rn_total = float(m_df['Daily_RN'].sum())
-            current_adr_actual = current_rev_total / current_rn_total if current_rn_total > 0 else 0
-            
-            num_days = calendar.monthrange(2026, selected_month)[1]
-            t_cap = TOTAL_ROOM_CAPACITY * num_days
-            current_occ_pct = (current_rn_total / t_cap * 100) if t_cap > 0 else 0.0
-    except: pass
+    with st.sidebar:
+        st.header("📂 데이터 사령부")
+        uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
+        if uploaded_files:
+            parsed_df = parse_uploaded_files(uploaded_files)
+            if not parsed_df.empty:
+                st.session_state['otb_data'] = parsed_df
+                st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
         
-st.title("🏛️ AMBER ORACLE v5.5")
-st.subheader("Revenue Architect Strategic War Room | Global Cloud Mode")
-st.markdown("---")
-
-y_cols = st.columns(6)
-for i in range(12):
-    m = i + 1; m_data = yearly_data_store[m]; bud = TARGET_DATA[m]['rev']
-    with y_cols[i % 6]:
-        p = (m_data['rev'] / bud * 100) if bud > 0 else 0
-        st.metric(f"{m}월 Revenue", f"₩{m_data['rev']/1000000:.0f}M", f"{p:.1f}% 달성")
-st.markdown("---")
-
-tgt_m = TARGET_DATA[selected_month]
-st.markdown(f"### 🎯 {selected_month}월 4D 목표 대비 실적 (Target vs Actual)")
-k1, k2, k3, k4 = st.columns(4)
-
-with k1: 
-    prog_rev = (current_rev_total/tgt_m['rev']*100) if tgt_m['rev']>0 else 0
-    st.metric("Total Revenue (OTB)", f"₩{current_rev_total:,.0f}", f"목표 ₩{tgt_m['rev']:,.0f} ({prog_rev:.1f}%)")
-with k2: 
-    prog_rn = (current_rn_total/tgt_m['rn']*100) if tgt_m['rn']>0 else 0
-    st.metric("Room Nights (RN)", f"{current_rn_total:,.0f} RN", f"목표 {tgt_m['rn']:,} RN ({prog_rn:.1f}%)")
-with k3: 
-    adr_diff = current_adr_actual - tgt_m['adr']
-    st.metric("Actual ADR", f"₩{current_adr_actual:,.0f}", f"목표대비 ₩{adr_diff:,.0f}", delta_color="normal")
-with k4: 
-    occ_diff = current_occ_pct - tgt_m['occ']
-    st.metric("Occupancy (OCC)", f"{current_occ_pct:.1f}%", f"목표대비 {occ_diff:.1f}%p", delta_color="normal")
-
-st.markdown("---")
-
-tabs = st.tabs([
-    "🚀 페이스", "🏢 객실 감사", "🔗 시장", "💸 채널", 
-    "🔮 예보", "🌟 리뷰", "🛰️ 감시", "⚔️ 대조(결론)", "🔮 AI 제안", "🎯 단가 조정"
-])
-
-with tabs[0]:
-    st.subheader(f"📊 {selected_month}월 예약 가속도 모니터링 (Fact-Check Dashboard)")
-    st.info("💡 **[아키텍트 팩트 동기화]** 파일 내부에서 '영업월'을 자동 판독하고, 파일명의 다운로드 날짜를 추적하여 OTB를 연장합니다. 3, 4번 그래프는 예약 유입일 기준 진화 과정을 보여줍니다.")
-    
-    # 1. 날짜 기준점 및 기본 변수 설정
-    num_d = calendar.monthrange(2026, selected_month)[1]
-    t_dt = pd.date_range(start=f"2026-{selected_month:02d}-01", end=f"2026-{selected_month:02d}-{num_d}")
-    start_trace = t_dt[0] - pd.DateOffset(months=3)
-    trace_dt = pd.date_range(start=start_trace, end=t_dt[-1])
-    
-    kst_now = datetime.now(timezone(timedelta(hours=9)))
-    today_date = kst_now.replace(tzinfo=None)
-    curr_d = today_date.day if today_date.month == selected_month else (num_d if today_date.month > selected_month else 1)
-    cur_idx = int(curr_d - 1) if curr_d <= num_d else -1
-    
-    # 2. 하드코딩 팩트 데이터베이스
-    FACT_DB = {
-        4: {1: 666606568, 2: 680240552, 3: 683484877, 6: 706396340, 7: 713650569, 8: 725514271, 9: 732471320, 10: 729130460, 13: 752906651},
-        5: {1: 580174512, 2: 584284522, 3: 589896496, 6: 604640008, 7: 617226508, 8: 630307581, 9: 638878045, 10: 646880667, 13: 677498662},
-        6: {1: 317608189, 2: 323004791, 3: 325341332, 6: 329998237, 7: 336899555, 8: 354565622, 9: 355016508, 10: 357755106, 13: 360980571}
-    }
-    
-    daily_otb_dict = {}
-    if selected_month in FACT_DB:
-        for day_k, val in FACT_DB[selected_month].items():
-            daily_otb_dict[day_k] = val / 100000000
-
-    # 🚀 SOB 파일 처리: 파일 내용의 영업월 판독 및 파일명의 업데이트 일자 추출
-    if sob_files:
-        for f in sob_files:
-            try:
-                f.seek(0)
-                raw_sob = pd.read_excel(f, header=None) if f.name.endswith('.xlsx') else pd.read_csv(f, encoding='cp949', header=None)
-                
-                # 파일 내용 상단에서 진짜 '영업월' 판독
-                content_month = None
-                for i in range(min(15, len(raw_sob))):
-                    row_str = "".join([str(x) for x in raw_sob.iloc[i].values]).replace(' ', '')
-                    m_match = re.search(r'202\d-(\d{2})', row_str)
-                    if m_match:
-                        content_month = int(m_match.group(1))
-                        break
-                
-                # 현재 선택된 월의 데이터인 경우에만 OTB 업데이트
-                if content_month == selected_month:
-                    # 파일명에서 업데이트 일자(Day) 추출 (8자리 날짜 포맷 대응)
-                    date_match = re.search(r'\d{8}', f.name)
-                    update_day = int(date_match.group()[-2:]) if date_match else curr_d
-                    
-                    max_val = 0
-                    for r_idx in range(len(raw_sob)):
-                        nums = [clean_numeric(x) for x in raw_sob.iloc[r_idx].values]
-                        if max(nums) > max_val: max_val = max(nums)
-                    
-                    if max_val > 100000000:
-                        daily_otb_dict[update_day] = max_val / 100000000
-            except: pass
-
-    # 3. 2번 궤도(Booking Pace) 데이터 생성 (수평선 제거 및 💡 절벽 현상 방어 로직 적용)
-    booking_pace_m = []
-    velocity = 0
-    if daily_otb_dict:
-        actual_last_day = max(daily_otb_dict.keys())
-        last_val = 0
-        for d in range(1, actual_last_day + 1):
-            if d in daily_otb_dict:
-                current_val = daily_otb_dict[d]
-                # 💡 새로 읽어온 값이 기존 추세보다 20% 이상 떨어지면 엑셀 파일 내역 오인식으로 간주하고 방어
-                if last_val > 0 and current_val < last_val * 0.8:
-                    pass
-                else:
-                    last_val = current_val
-            booking_pace_m.append(last_val)
+        st.markdown("---")
         
-        cur_rev_sob = booking_pace_m[-1] * 100000000 if booking_pace_m else 0
-        if len(booking_pace_m) >= 8:
-            velocity = ((booking_pace_m[-1] - booking_pace_m[-8]) / 7) * 100000000
-    else:
-        cur_rev_sob = 0
+        if st.button("🔄 새로고침"):
+            st.cache_data.clear()
+            st.rerun()
 
-    # 4. S-Curve 및 가이드라인 연산
-    tgt_m = TARGET_DATA.get(selected_month, {"rev": 0, "rn": 0, "adr": 0, "occ": 0})
-    tgt_rev_100m = tgt_m['rev'] / 100000000
-    base_otb_ratio = 0.50
-    days_arr = np.arange(1, num_d + 1)
-    pacing_curve_ratio = base_otb_ratio + (1 - base_otb_ratio) * ((days_arr / num_d) ** 0.6)
-    o_p = tgt_rev_100m * pacing_curve_ratio
-    u_b, l_b = o_p * 1.08, o_p * 0.92
-
-    # 5. 3, 4번 그래프용 PMS 데이터 연산 (Temp_Bk 안전 보장)
-    booking_evolution = []
-    actual_curve = []
-    if not df_full_pms.empty:
-        t_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
+        # -----------------------------------------------------------------
+        # [NEW] 글로벌 데이터 타임머신 (모든 탭 동기화)
+        # -----------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("### 🕰️ 데이터 타임머신")
+        st.caption("선택한 일자에 수집된 시장 데이터를 전체 탭에 일괄 적용합니다.")
         
-        if 'Temp_Bk' in t_df.columns and not t_df.empty:
-            # 3번: 진화 그래프 (예약일 기준 누적)
-            for d in trace_dt:
-                if d > today_date: break
-                check_ts = d.replace(hour=23, minute=59, second=59)
-                evol_sum = t_df[t_df['Temp_Bk'] <= check_ts]['Daily_Rev'].sum()
-                booking_evolution.append(evol_sum / 100000000)
-            
-            # 4번: 리드타임 곡선 (투숙 전 90일부터의 유입 패턴)
-            t_df['LeadTime'] = (t_df['Stay_Date'] - t_df['Temp_Bk']).dt.days
-            for d in np.arange(-90, 1):
-                curve_sum = t_df[t_df['LeadTime'] >= -d]['Daily_Rev'].sum()
-                actual_curve.append(curve_sum / 100000000)
+        df_f_side = get_flight_data_only()
+        df_c_side = get_comp_data_only()
+        df_r_side = get_rent_data_only()
 
-    # 6. 메트릭 최종 확정
-    cur_rev = current_rev_total if current_rev_total > 0 else cur_rev_sob
-    expected_pct = pacing_curve_ratio[cur_idx] if cur_idx != -1 else 1.0
+        all_dates = set()
+        if not df_f_side.empty: all_dates.update(df_f_side['search_date_str'].dropna().unique())
+        if not df_c_side.empty: all_dates.update(df_c_side['search_date_str'].dropna().unique())
+        if not df_r_side.empty: all_dates.update(df_r_side['search_date_str'].dropna().unique())
 
-    # 7. UI 출력
-    st.markdown(f"### 🧭 OTB 궤도 검증 (데이터 업데이트: {max(daily_otb_dict.keys()) if daily_otb_dict else '팩트'}일 기준)")
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("순수 객실 매출 (OTB Fact)", f"{int(cur_rev):,} 원")
-    m2.metric("세이프존 기준점", f"{int(o_p[cur_idx]*100000000):,} 원" if cur_idx != -1 else "-")
-    m3.metric("최근 7일 일평균 픽업", f"{int(velocity):,} 원/일")
-    m4.metric("월말 예상 마감", f"{int(cur_rev / expected_pct):,} 원")
-    
-    # 그래프 1, 2
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("#### 1️⃣ 실투숙 누적 궤도 (Stay Pace)")
-        fig1 = go.Figure()
-        fig1.add_trace(go.Scatter(x=t_dt, y=[tgt_rev_100m*(i/num_d) for i in range(1, num_d+1)], name="Target", line=dict(color="gray", dash='dot')))
-        if len(actual_pace) > 0:
-            fig1.add_trace(go.Scatter(x=t_dt[:curr_d], y=actual_pace[:curr_d], name="Actual (PMS Net)", line=dict(color="#00D1FF", width=4)))
-        st.plotly_chart(fig1.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=10)), use_container_width=True)
-        
-    with c2:
-        st.markdown("#### 2️⃣ 당월 확보 매출 궤도 (Booking Pace)")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=t_dt, y=l_b, mode='lines', line_width=0, fill='tonexty', fillcolor='rgba(0,209,255,0.1)', name="Safe Zone"))
-        fig2.add_trace(go.Scatter(x=t_dt, y=o_p, name="Oracle S-Curve", line=dict(color="#00D1FF", width=2)))
-        if booking_pace_m: 
-            plot_x = t_dt[:len(booking_pace_m)]
-            fig2.add_trace(go.Scatter(x=plot_x, y=booking_pace_m, name="Actual (SOB)", line=dict(color="#FF4B4B", width=4)))
-        st.plotly_chart(fig2.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=10)), use_container_width=True)
+        all_search_dates = sorted([d for d in all_dates if d != 'unknown' and d != ''], reverse=True)
 
-    # 그래프 3, 4
-    c3, c4 = st.columns(2)
-    with c3:
-        st.markdown("#### 3️⃣ 3개월 전부터의 매출 진화 (Evolution)")
-        fig3 = go.Figure()
-        if booking_evolution:
-            fig3.add_trace(go.Scatter(x=trace_dt[:len(booking_evolution)], y=booking_evolution, name="Build-up (PMS)", line=dict(color="#FFD700", width=3)))
-        st.plotly_chart(fig3.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=10)), use_container_width=True)
-
-    with c4:
-        st.markdown("#### ⏳ 4️⃣ 리드타임별 예약 곡선 (D-90)")
-        fig4 = go.Figure()
-        _, t_c = get_booking_curve(tgt_rev_100m, 90, 1.0)
-        fig4.add_trace(go.Scatter(x=np.arange(-90, 1), y=t_c, name="Standard", line=dict(color="gray", dash='dash')))
-        if actual_curve:
-            fig4.add_trace(go.Scatter(x=np.arange(-90, 1), y=actual_curve, name="Actual (PMS)", line=dict(color='#FF4B4B', width=4)))
-        st.plotly_chart(fig4.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=10)), use_container_width=True)
-        
-with tabs[1]:
-    st.subheader("🏢 타입별 객실 매출 및 유료 ADR 정밀 감사")
-    st.info("💡 **[Architect Logic]** 매출 0원(무료/컴프) 객실은 ADR 계산에서 제외하며, '무료 RN' 항목으로 별도 집계합니다.")
-    
-    if df_full_pms is not None and not df_full_pms.empty:
-        # 선택된 월의 투숙 데이터 필터링
-        audit_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
-        
-        if not audit_df.empty:
-            # 💡 [핵심] 유료와 무료를 구분하여 집계
-            room_audit = audit_df.groupby('객실타입').apply(lambda x: pd.Series({
-                '총 객실매출': x['Daily_Rev'].sum(),
-                '유료 RN': (x['Daily_Rev'] > 0).sum(),
-                '무료 RN': (x['Daily_Rev'] == 0).sum(),
-                '전체 RN': len(x)
-            })).reset_index()
-            
-            # 💡 유료 ADR 계산 (총매출 / 유료 RN)
-            room_audit['유료 ADR'] = (room_audit['총 객실매출'] / room_audit['유료 RN']).replace([np.inf, -np.inf], 0).fillna(0)
-            
-            # 보기 좋게 정렬 및 컬럼 구성
-            room_audit = room_audit.sort_values(by='총 객실매출', ascending=False)
-            
-            # 💡 [에러 해결] background_gradient 제거본
-            display_cols = ['객실타입', '총 객실매출', '유료 RN', '무료 RN', '전체 RN', '유료 ADR']
-            st.dataframe(room_audit[display_cols].style.format({
-                '총 객실매출': '₩{:,.0f}', 
-                '유료 RN': '{:,.0f}', 
-                '무료 RN': '{:,.0f}', 
-                '전체 RN': '{:,.0f}', 
-                '유료 ADR': '₩{:,.0f}'
-            }), use_container_width=True, height=400)
-            
-            # 🔍 상세 리스트 필터링
-            with st.expander("🔍 타입별 유료/무료 투숙 리스트 상세 대조"):
-                target_type = st.selectbox("검증할 타입", room_audit['객실타입'].unique())
-                detail_view = audit_df[audit_df['객실타입'] == target_type].copy()
-                detail_view['매출구분'] = detail_view['Daily_Rev'].apply(lambda x: '유료' if x > 0 else '무료(0원)')
-                
-                st.write(f"📊 **{target_type}** 상세 내역 (총 {len(detail_view)}박)")
-                st.dataframe(detail_view[['Stay_Date', 'Daily_Rev', '매출구분']].sort_values('Stay_Date'), use_container_width=True)
-                
+        if all_search_dates:
+            selected_global_date = st.selectbox("조회할 크롤링 수집일 선택", all_search_dates, index=0)
+            st.session_state['global_search_date'] = selected_global_date
         else:
-            st.warning(f"{selected_month}월 투숙 데이터가 없습니다.")
-    else:
-        st.info("PMS 데이터를 업로드해 주세요.")
+            st.session_state['global_search_date'] = "-"
+            st.info("수집된 크롤링 데이터가 없습니다.")
+
+        st.markdown("---")
+
+        # 날씨 API
+        api_key = st.secrets.get("data_portal_key", None)
+        col_w1, col_w2 = st.columns([1, 3])
+        with col_w1: st.subheader("🌤️ 제주 날씨")
+        with col_w2:
+            if api_key:
+                try:
+                    url = "http://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getUltraSrtNcst"
+                    now = datetime.now()
+                    base_date = now.strftime("%Y%m%d")
+                    base_time = "2300" if now.hour == 0 else f"{now.hour:02d}00"
+                    if now.minute < 40:
+                        if now.hour == 0: base_date = (now - pd.Timedelta(days=1)).strftime("%Y%m%d")
+                        else: base_time = f"{now.hour-1:02d}00"
+                    res = requests.get(url, params={"serviceKey": api_key, "pageNo": "1", "numOfRows": "100", "dataType": "JSON", "base_date": base_date, "base_time": base_time, "nx": "52", "ny": "38"}, timeout=3)
+                    if res.status_code == 200:
+                        items = res.json()['response']['body']['items']['item']
+                        w_data = {i['category']: i['obsrValue'] for i in items if i['category'] in ['T1H', 'RN1', 'REH']}
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric("기온", f"{w_data.get('T1H', '-')}°C")
+                        m2.metric("강수량", f"{w_data.get('RN1', '0')}mm")
+                        m3.metric("습도", f"{w_data.get('REH', '-')}%")
+                except: st.caption("날씨 정보 수신 대기중...")
+            else: st.caption("API Key 설정 필요")
         
-with tabs[2]:
-    fig3 = go.Figure(); fig3.add_trace(go.Bar(x=list(range(7)), y=[100, 150, 300, 500, 700, 900, 1000], name="수요", opacity=0.3))
-    fig3.add_trace(go.Scatter(x=list(range(7)), y=[35]*7, name="ADR", yaxis="y2", line_width=4)); fig3.update_layout(template="plotly_dark", yaxis2=dict(overlaying="y", side="right")); st.plotly_chart(fig3, use_container_width=True)
+        st.markdown("---")
 
-with tabs[3]:
-    if real_channel_df is not None: 
-        c_col = real_channel_df.columns[0]; r_col = real_channel_df.columns[1]
-        fig4 = px.pie(real_channel_df, values=r_col, names=c_col, hole=0.4, title="Channel Share", template="plotly_dark"); st.plotly_chart(fig4, use_container_width=True)
-
-with tabs[4]:
-    st.header(f"🔮 {selected_month}월 매출 마감 예보 시뮬레이션")
-    st.info("💡 **[Revenue Architect Forecast]** 단순 산술 평균이 아닌, 오라클 S-커브를 역산하여 남은 기간의 픽업 예상치를 더한 '정밀 마감 예보'입니다.")
-    
-    num_days = calendar.monthrange(2026, selected_month)[1]
-    dates = pd.date_range(start=f"2026-{selected_month:02d}-01", periods=num_days)
-    
-    # 🎯 1. 기준 데이터 설정
-    # cur_rev는 현재 확정된 OTB (과거 투숙 + 미래 예약 합계)
-    cur_rev_unit = cur_rev / 100000000 
-    target_goal_unit = tgt_m['rev'] / 100000000
-    
-    # 🎯 2. [핵심 패치] S-커브 기반 지수 예보 로직
-    # 현재 날짜의 S-커브 비중 (예: 15일이면 약 0.83)
-    # cur_idx와 expected_pct는 0번 탭에서 계산된 값을 공유함
-    if 'expected_pct' in locals() and expected_pct > 0:
-        # 공식: 현재 매출 / 현재 시점의 기대 비중 = 최종 예상 마감
-        forecast_final_unit = cur_rev_unit / expected_pct
-    else:
-        forecast_final_unit = cur_rev_unit
-
-    # 🎯 3. 예보 라인 생성 (현재 점부터 월말 예상 점까지 부드럽게 연결)
-    forecast_line = [None] * num_days
-    # 오늘 날짜까지는 실제 OTB 페이스를 추종 (actual_pace가 있을 경우)
-    effective_d = curr_d if curr_d <= num_days else num_days
-    
-    # 예보 곡선 그리기
-    for i in range(num_days):
-        day_ratio = pacing_curve_ratio[i] # 해당 일자의 S-커브 비중
-        # 현재 매출을 기준으로 미래의 비중만큼 채워나감
-        forecast_line[i] = forecast_final_unit * day_ratio
-
-    # 🎯 4. 시각화
-    fig_fcst = go.Figure()
-    # 목표선 (Target)
-    fig_fcst.add_trace(go.Scatter(x=dates, y=o_p, name="Target", line=dict(color="rgba(0,209,255,0.3)", dash="dash")))
-    
-    # 실제 OTB선 (Actual)
-    if 'booking_pace_m' in locals() and booking_pace_m:
-        fig_fcst.add_trace(go.Scatter(x=dates[:len(booking_pace_m)], y=booking_pace_m, name="Actual (OTB)", line=dict(color="#00D1FF", width=4)))
-    
-    # 오라클 예보선 (Forecast)
-    fig_fcst.add_trace(go.Scatter(x=dates, y=forecast_line, name="Oracle Forecast", line=dict(color="#FFD700", width=2, dash="dot")))
-    
-    fig_fcst.update_layout(template="plotly_dark", height=450, title=f"{selected_month}월 매출 마감 예측 (단위: 억원)", yaxis_title="누적 매출 (억)")
-    st.plotly_chart(fig_fcst, use_container_width=True)
-    
-    # 🎯 5. 하단 요약 메트릭
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("현재 누적 매출 (OTB)", f"{cur_rev_unit:.2f} 억")
-    with c2:
-        target_diff = forecast_final_unit - target_goal_unit
-        st.metric("월말 예상 매출 (Forecast)", f"{forecast_final_unit:.2f} 억", f"{target_diff:+.2f} 억")
-    with c3:
-        achievement_rate = (forecast_final_unit / target_goal_unit * 100) if target_goal_unit > 0 else 0
-        st.metric("예상 달성률", f"{achievement_rate:.1f}%", delta=f"{achievement_rate-100:.1f}%p")
-
-    # 💡 아키텍트 브리핑
-    st.success(f"📢 **오라클 브리핑:** 현재 4월 {curr_d}일 기준, 전체 매출의 {expected_pct*100:.1f}%가 이미 확보되어 있어야 하는 페이스입니다. 이를 역산하면 최종 마감은 **{forecast_final_unit:.2f}억**으로 예상되며, 이는 당초 목표 대비 **{achievement_rate:.1f}%** 수준입니다.")
-
-with tabs[5]: st.subheader("🌟 리뷰 분석"); st.info("연동 대기 중")
-
-with tabs[6]:
-    st.subheader("🛰️ 외부 시장 지표 감시 및 매출 상관관계 (Market Correlation)")
-    st.info("💡 Firebase에서 수집된 실제 크롤링 데이터(항공, 렌터카, 개별 경쟁사)를 가져와 투숙일(Stay Date) 기준으로 분석합니다.")
-    
-    if not df_full_pms.empty and firebase_admin._apps:
-        target_df_corr = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
-        if not target_df_corr.empty:
-            daily_pms = target_df_corr.groupby(target_df_corr['Stay_Date'].dt.date).agg(
-                rev=('Daily_Rev', 'sum'),
-                rn=('Daily_RN', 'sum')
-            ).reset_index()
-            daily_pms.rename(columns={'Stay_Date': 'date'}, inplace=True)
-            daily_pms['date'] = pd.to_datetime(daily_pms['date'])
-            daily_pms['adr'] = daily_pms['rev'] / daily_pms['rn']
-            daily_pms['adr'] = daily_pms['adr'].fillna(0)
-            
-            db = firestore.client()
-            flight_data, rental_data, comp_data = [], [], []
-            month_prefix = f"2026-{selected_month:02d}"
-            
+        # 스냅샷 전략 타임머신 (7번 탭 전용)
+        st.markdown("### 🕰️ 전략 타임머신")
+        snapshot_options = ["현재 (Real-time)"]
+        
+        if db_flight:
             try:
-                flights_ref = db.collection('flight_prices').stream()
-                for doc in flights_ref:
-                    d = doc.to_dict()
-                    if d.get('date', '').startswith(month_prefix):
-                        flight_data.append({'date': d.get('date'), 'flight_price': d.get('min_price', 0)})
-                        
-                rentals_ref = db.collection('rental_prices').stream()
-                for doc in rentals_ref:
-                    d = doc.to_dict()
-                    if d.get('date', '').startswith(month_prefix):
-                        rental_data.append({'date': d.get('date'), 'rental_price': d.get('Ray_Price', 0)})
-                        
-                comps_ref = db.collection('hotel_comp_prices').stream()
-                for doc in comps_ref:
-                    d = doc.to_dict()
-                    if d.get('date', '').startswith(month_prefix):
-                        comp_data.append({
-                            'date': d.get('date'), 
-                            'hotel_name': d.get('hotel_name', 'Unknown'), 
-                            'price': d.get('price', 0)
-                        })
-            except Exception as e:
-                pass
+                docs = db_flight.collection('strategy_history').stream()
+                saved_dates = sorted([doc.id for doc in docs], reverse=True)
+                snapshot_options.extend(saved_dates)
+            except: pass
+        
+        selected_snapshot = st.selectbox(
+            "과거 시점 데이터 불러오기", 
+            snapshot_options,
+            index=0,
+            help="선택하면 [Tab 7]의 전체 대시보드가 해당 시점으로 복구됩니다."
+        )
+        st.session_state['selected_snapshot_id'] = selected_snapshot
 
-            df_flight = pd.DataFrame(flight_data)
-            if not df_flight.empty: df_flight['date'] = pd.to_datetime(df_flight['date'])
+    # =========================================================================
+    # 5. 탭 구성 (UI)
+    # =========================================================================
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["✈️ 항공권 (수요)", "🏨 엠버 예약(분석)", "⚔️ 경쟁사 비교", "🚗 렌터카 분석", "📊 입도객 추이", "📜 과거 분석 (Pace)", "🧠 전략 사령부 (BI)"])
+
+    # --- TAB 1: 항공권 ---
+    with tab1:
+        st.header("✈️ 김포 -> 제주 항공권 (수요 강도 & 가격 추적)")
+        with st.spinner("항공권 데이터를 불러오는 중입니다..."):
+            df_f = get_flight_data_only()
+        
+        if not df_f.empty:
+            dates = sorted(df_f['search_date_str'].unique(), reverse=True)
+            global_date = st.session_state.get('global_search_date', '-')
             
-            df_rental = pd.DataFrame(rental_data)
-            if not df_rental.empty: df_rental['date'] = pd.to_datetime(df_rental['date'])
+            latest = global_date if global_date in dates else (dates[0] if dates else "-")
+            st.info(f"💡 현재 화면은 **{latest}**에 수집된 항공권 시장 상황을 보여줍니다.")
             
-            df_comp = pd.DataFrame(comp_data)
-            if not df_comp.empty: 
-                df_comp['date'] = pd.to_datetime(df_comp['date'])
-                df_comp_pivot = df_comp.pivot_table(index='date', columns='hotel_name', values='price', aggfunc='mean').reset_index()
+            if dates:
+                df_lat = df_f[df_f['search_date_str'] == latest].copy()
+            
+                if not df_lat.empty:
+                    st.subheader("🔥 요일별 요금 히트맵")
+                    df_lat['day_name'] = df_lat['date'].dt.day_name()
+                    days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                    fig_h = px.density_heatmap(df_lat, x='date', y='day_name', z='min_price', histfunc='avg', 
+                                             color_continuous_scale='RdYlGn_r', category_orders={'day_name': days_order})
+                    st.plotly_chart(fig_h, use_container_width=True)
+
+                    st.subheader("📉 전주 대비 가격 변동 (WoW)")
+                    target_past = (datetime.strptime(latest, "%Y%m%d") - timedelta(days=7)).strftime("%Y%m%d")
+                    past_cands = [d for d in dates if d <= target_past]
+                    if past_cands:
+                        df_p = df_f[df_f['search_date_str'] == past_cands[0]].copy()
+                        df_wow = pd.merge(df_lat[['date', 'min_price']], df_p[['date', 'min_price']], on='date', suffixes=('_curr', '_prev'))
+                        df_wow['diff'] = df_wow['min_price_curr'] - df_wow['min_price_prev']
+                        fig_w = px.bar(df_wow, x='date', y='diff', color='diff', color_continuous_scale='RdBu_r', title=f"가격 변동 ({past_cands[0]} 대비)")
+                        st.plotly_chart(fig_w, use_container_width=True)
+                    else: st.caption("비교할 과거 데이터가 부족합니다.")
+                
+            st.markdown("---")
+            st.subheader("📊 전체 기간 가격 흐름 (전체 수집일)")
+            st.line_chart(df_f.pivot_table(index='date', columns='search_date_str', values='min_price'))
+
+            st.markdown("---")
+            st.subheader("📉 항공권 가격 정책 변화 감지 (Policy Shift)")
+            st.caption("과거 시점 대비 현재의 **항공권 요금 정책(미래 180일)**이 어떻게 바뀌었는지 비교합니다.")
+
+            if len(dates) < 2:
+                st.warning("⚠️ 비교할 과거 데이터가 충분하지 않습니다.")
             else:
-                df_comp_pivot = pd.DataFrame()
+                col_f1, col_f2 = st.columns(2)
+                with col_f1:
+                    default_curr_idx = dates.index(latest) if latest in dates else 0
+                    f_date_curr = st.selectbox("기준 조회일 (실선)", dates, index=default_curr_idx, key='f_curr')
+                with col_f2:
+                    def_idx = 1 if len(dates) > 1 else 0
+                    f_date_prev = st.selectbox("과거 조회일 (점선)", dates, index=def_idx, key='f_prev')
 
-            if not df_flight.empty: daily_pms = pd.merge(daily_pms, df_flight.groupby('date')['flight_price'].mean().reset_index(), on='date', how='left')
-            else: daily_pms['flight_price'] = 0
-            
-            if not df_rental.empty: daily_pms = pd.merge(daily_pms, df_rental.groupby('date')['rental_price'].mean().reset_index(), on='date', how='left')
-            else: daily_pms['rental_price'] = 0
-            
-            if not df_comp_pivot.empty: 
-                daily_pms = pd.merge(daily_pms, df_comp_pivot, on='date', how='left')
-            
-            for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill']:
-                if h not in daily_pms.columns:
-                    daily_pms[h] = 0
+                mask_dates = df_f['search_date_str'].isin([f_date_curr, f_date_prev])
+                df_shift_f = df_f[mask_dates].copy()
 
-            daily_pms.ffill(inplace=True)
-            daily_pms.fillna(0, inplace=True)
+                if not df_shift_f.empty:
+                    df_shift_f['조회일'] = pd.to_datetime(df_shift_f['search_date_str'], format='%Y%m%d').dt.strftime('%m-%d')
+                    df_shift_f = df_shift_f.sort_values(['search_date_str', 'date'])
 
-            st.markdown("#### 📈 실제 시장 요금 vs 엠버퓨어힐 매출 트렌드")
-            fig_trend = go.Figure()
-            fig_trend.add_trace(go.Bar(x=daily_pms['date'], y=daily_pms['rev'], name="우리 매출(Gross)", opacity=0.4, yaxis='y1', marker_color='#00D1FF'))
-            fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms['flight_price'], name="평균 항공권", mode='lines+markers', yaxis='y2', line=dict(color='#4CAF50')))
-            fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms['rental_price'], name="평균 렌터카", mode='lines+markers', yaxis='y2', line=dict(color='#FFD700')))
+                    fig_shift_f = px.line(df_shift_f, x='date', y='min_price', color='조회일', line_dash='조회일', 
+                                          markers=True, title=f"항공권 가격 이동 비교 ({f_date_prev} vs {f_date_curr})",
+                                          labels={'date': '탑승 날짜', 'min_price': '최저가(원)', '조회일': '데이터 수집일'})
+                    fig_shift_f.update_traces(line=dict(width=2))
+                    st.plotly_chart(fig_shift_f, use_container_width=True)
+        else: st.warning("데이터가 없습니다.")
+
+    # --- TAB 2: 호텔 OTB ---
+    with tab2:
+        st.header("🏨 엠버퓨어힐 OTB 심화 분석 (Deep Dive)")
+        st.caption("실시간 예약 DB(Firebase)를 연동하여, 선택한 기간의 예약 속도(Pace)와 퀄리티를 입체적으로 분석합니다.")
+
+        with st.spinner("예약 데이터를 불러와 필드를 매핑 중입니다..."):
+            df_h_raw = get_db_bookings_only()
+
+        if not df_h_raw.empty:
+            def safe_to_datetime(series):
+                return pd.to_datetime(series, errors='coerce', utc=True)
+
+            if '예약일자' in df_h_raw.columns: df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['예약일자'])
+            elif '접수일자' in df_h_raw.columns: df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['접수일자'])
+            else: df_h_raw['booking_date'] = pd.NaT
+
+            df_h_raw['checkin_date'] = safe_to_datetime(df_h_raw['입실일자']) if '입실일자' in df_h_raw.columns else pd.NaT
+            df_h_raw['checkout_date'] = safe_to_datetime(df_h_raw['퇴실일자']) if '퇴실일자' in df_h_raw.columns else pd.NaT
             
-            hotel_colors = {'Parnas_Jeju': '#FF4B4B', 'Grand_Josun': '#9370DB', 'Amber_Pure_Hill': '#FFFFFF'}
-            hotel_labels = {'Parnas_Jeju': '파르나스', 'Grand_Josun': '그랜드조선', 'Amber_Pure_Hill': '엠버퓨어힐(크롤링)'}
+            if '총금액' in df_h_raw.columns: df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액'], errors='coerce').fillna(0)
+            elif '총금액_숫자' in df_h_raw.columns: df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액_숫자'], errors='coerce').fillna(0)
+            else: df_h_raw['revenue'] = 0
+
+            mask_valid = df_h_raw['booking_date'].notnull() & df_h_raw['checkin_date'].notnull()
+            if mask_valid.any(): df_h_raw.loc[mask_valid, 'lead_time'] = (df_h_raw.loc[mask_valid, 'checkin_date'] - df_h_raw.loc[mask_valid, 'booking_date']).dt.days
+            df_h_raw['lead_time'] = df_h_raw['lead_time'].fillna(0)
             
-            for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill']:
-                if h in daily_pms.columns and not daily_pms[h].eq(0).all():
-                    fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms[h], name=hotel_labels.get(h, h), mode='lines+markers', yaxis='y2', line=dict(color=hotel_colors.get(h, '#9e2a2b'))))
+            mask_los = df_h_raw['checkin_date'].notnull() & df_h_raw['checkout_date'].notnull()
+            if mask_los.any(): df_h_raw.loc[mask_los, 'los'] = (df_h_raw.loc[mask_los, 'checkout_date'] - df_h_raw.loc[mask_los, 'checkin_date']).dt.days
+            df_h_raw['los'] = df_h_raw['los'].fillna(1)
             
-            fig_trend.update_layout(
-                template="plotly_dark", height=450,
-                yaxis=dict(title="우측: 매출 (원)", side='right', showgrid=False),
-                yaxis2=dict(title="좌측: 시장 단가 (원)", overlaying='y', side='left', showgrid=True),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            st.plotly_chart(fig_trend, use_container_width=True)
+            df_h_raw['checkin_month'] = df_h_raw['checkin_date'].dt.strftime('%Y-%m')
+            df_h_raw['checkin_day'] = df_h_raw['checkin_date'].dt.day_name()
             
-            st.markdown("#### 🔄 핵심 지표 상관계수 (Correlation Coefficient)")
-            try:
-                corr_cols = ['rev', 'rn', 'adr', 'flight_price', 'rental_price'] + [h for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill'] if h in daily_pms.columns]
-                corr_df = daily_pms[corr_cols].corr()
+            st.markdown("#### 📅 분석 기간 설정")
+            min_dt, max_dt = df_h_raw['checkin_date'].min(), df_h_raw['checkin_date'].max()
+            
+            if pd.isnull(min_dt) or pd.isnull(max_dt):
+                d_start, d_end = datetime.now().date(), datetime.now().date()
+            else:
+                d_start = datetime.now().date()
+                d_end = d_start + timedelta(days=30)
+                if d_start < min_dt.date(): d_start = min_dt.date()
+                if d_end > max_dt.date(): d_end = max_dt.date()
                 
-                c1, c2, c3 = st.columns(3)
-                corr_flight = corr_df.loc['rn', 'flight_price'] if 'flight_price' in corr_df else 0
-                corr_rent = corr_df.loc['rn', 'rental_price'] if 'rental_price' in corr_df else 0
+            col_d1, col_d2 = st.columns([2, 1])
+            with col_d1:
+                sel_dates = st.date_input("체크인 기간 선택", value=(d_start, d_end), min_value=min_dt.date() if pd.notnull(min_dt) else None, max_value=max_dt.date() if pd.notnull(max_dt) else None)
+            
+            if isinstance(sel_dates, tuple):
+                if len(sel_dates) == 2: s_date, e_date = sel_dates
+                elif len(sel_dates) == 1: s_date = e_date = sel_dates[0]
+                else: s_date, e_date = d_start, d_end
+            else: s_date = e_date = sel_dates
+            
+            mask_period = (df_h_raw['checkin_date'].dt.date >= s_date) & (df_h_raw['checkin_date'].dt.date <= e_date)
+            df_h = df_h_raw[mask_period].copy()
+            
+            st.info(f"선택하신 기간 (**{s_date} ~ {e_date}**)의 예약 데이터 **{len(df_h):,}건**을 분석합니다.")
+            st.markdown("---")
+
+            if not df_h.empty:
+                total_rev = df_h['revenue'].sum()
+                total_bk = len(df_h)
+                adr = total_rev / total_bk if total_bk > 0 else 0
+                avg_lead = df_h['lead_time'].mean()
                 
-                target_comp = 'Parnas_Jeju' if 'Parnas_Jeju' in corr_df else 'Grand_Josun'
-                corr_comp = corr_df.loc['adr', target_comp] if target_comp in corr_df else 0
-                comp_label = "파르나스" if target_comp == 'Parnas_Jeju' else "그랜드조선"
+                k1, k2, k3, k4 = st.columns(4)
+                k1.metric("기간 총 매출", f"{int(total_rev):,}원")
+                k2.metric("기간 예약 건수", f"{total_bk:,}건")
+                k3.metric("평균 객단가 (ADR)", f"{int(adr):,}원")
+                k4.metric("평균 리드타임", f"{avg_lead:.1f}일")
                 
-                def get_corr_text(val):
-                    if pd.isna(val): return "데이터 부족"
-                    if val > 0.7: return "매우 강한 양의 상관관계"
-                    elif val > 0.3: return "양의 상관관계"
-                    elif val > -0.3: return "상관관계 미미"
-                    elif val > -0.7: return "음의 상관관계"
-                    else: return "매우 강한 음의 상관관계"
-                    
-                with c1: st.metric("✈️ 항공권 요금 vs 우리 호텔 판매량(RN)", f"{corr_flight:.2f}", get_corr_text(corr_flight), delta_color="off")
-                with c2: st.metric("🚗 렌터카 요금 vs 우리 호텔 판매량(RN)", f"{corr_rent:.2f}", get_corr_text(corr_rent), delta_color="off")
-                with c3: st.metric(f"🏨 {comp_label} 요금 vs 우리 호텔 ADR", f"{corr_comp:.2f}", get_corr_text(corr_comp), delta_color="off")
-                    
                 st.markdown("---")
-                st.markdown("#### 🔬 상세 산점도 분석 (Scatter Plot)")
+                st.subheader("📈 Booking Pace (선택 기간 기준)")
+                target_months = df_h['checkin_month'].unique()
+                df_pace = df_h[df_h['checkin_month'].isin(target_months)].copy()
                 
-                x_options = ['flight_price', 'rental_price'] + [h for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill'] if h in daily_pms.columns]
-                x_format = {'flight_price':'평균 항공권 요금', 'rental_price':'평균 렌터카 요금', 'Parnas_Jeju':'파르나스 요금', 'Grand_Josun':'그랜드조선 요금', 'Amber_Pure_Hill':'엠버퓨어힐(크롤링) 요금'}
-                
-                x_axis = st.selectbox("X축(원인) 지표 선택", x_options, format_func=lambda x: x_format.get(x, x))
-                y_axis = st.selectbox("Y축(결과) 지표 선택", ['rn', 'rev', 'adr'], format_func=lambda x: {'rn':'판매 객실수(RN)', 'rev':'총매출(Gross)', 'adr':'엠버퓨어힐 평균 ADR'}[x])
-                
-                if not daily_pms[x_axis].eq(0).all():
-                    fig_scatter = px.scatter(daily_pms, x=x_axis, y=y_axis, template="plotly_dark", 
-                                             title=f"시장 지표에 따른 우리 호텔 실적 변화", opacity=0.7)
-                    fig_scatter.update_traces(marker=dict(size=12, color='#00D1FF'))
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-                else:
-                    st.warning("해당 지표의 시장 데이터가 아직 수집되지 않았습니다.")
-            except Exception as e:
-                pass
-        else:
-            st.info("해당 월의 PMS 데이터가 부족하여 상관관계를 분석할 수 없습니다.")
-    else:
-        st.info("상관관계 분석을 위해 PMS 데이터를 먼저 업로드(또는 로드)해 주세요.")
-
-with tabs[7]:
-    st.markdown("---")
-    st.subheader("📊 전략 보고서 정식 출력")
-    if st.button("📄 회장님 보고용 종합 리포트 생성 (PDF)"):
-        safe_adj_adr = int(sim_adr - current_adr_actual) if 'sim_adr' in locals() else 0
-        safe_gain = int(ar_net - base_net) if ('ar_net' in locals() and 'base_net' in locals()) else 0
-        
-        report_payload = {
-            'date': kst_now.strftime('%Y-%m-%d'),
-            'month': selected_month,
-            'act_rev': current_rev_total,
-            'tgt_rev': tgt_m['rev'],
-            'rev_pct': (current_rev_total / tgt_m['rev'] * 100) if tgt_m['rev'] > 0 else 0,
-            'act_rn': current_rn_total,
-            'tgt_rn': tgt_m['rn'],
-            'rn_pct': (current_rn_total / tgt_m['rn'] * 100) if tgt_m['rn'] > 0 else 0,
-            'act_adr': current_adr_actual,
-            'tgt_adr': tgt_m['adr'],
-            'adr_diff': int(current_adr_actual - tgt_m['adr']),
-            'adj_adr': safe_adj_adr,
-            'gain': safe_gain
-        }
-        
-        try:
-            pdf_data = export_comprehensive_report(report_payload)
-            st.download_button(
-                label="📥 PDF 리포트 다운로드",
-                data=pdf_data,
-                file_name=f"Amber_Strategy_Report_{selected_month}월.pdf",
-                mime="application/pdf"
-            )
-            st.success("✅ 보고서가 성공적으로 생성되었습니다!")
-        except Exception as e:
-            st.error(f"❌ PDF 생성 실패: {e}")
-
-    # ==========================================
-    # 🏛️ 아키텍트 전용: 총지배인 정책 오류 입증 섹션
-    # ==========================================
-    st.markdown("---")
-    st.header(f"🏟️ {selected_month}월 수익 최적화 검증 (Architecture vs GM Policy)")
-    
-    st.subheader("1️⃣ 과거 가격 탄력성 검증 (Price Elasticity)")
-    if not df_full_pms.empty:
-        try:
-            target_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
-            elasticity_df = target_df.groupby('Stay_Date').agg({'Daily_Rev':'sum', 'Daily_RN':'sum'}).reset_index()
-            elasticity_df['adr'] = elasticity_df['Daily_Rev'] / elasticity_df['Daily_RN']
-            
-            corr_val = elasticity_df['adr'].corr(elasticity_df['Daily_RN'])
-            
-            c_e1, c_e2 = st.columns([2, 1])
-            with c_e1:
-                fig_e = px.scatter(elasticity_df, x='adr', y='Daily_RN', trendline="ols", 
-                                   title="우리 호텔 ADR 상승 시 물량 하락 변동성", template="plotly_dark")
-                st.plotly_chart(fig_e, use_container_width=True)
-            with c_e2:
-                st.metric("가격 탄력성 지수", f"{corr_val:.2f}", "0에 가까울수록 가격저항 낮음" if corr_val > -0.3 else "가격저항 높음")
-                st.write("💡 **분석 결과:**")
-                if corr_val > -0.3: st.success("현재 단가를 더 올려도 물량 이탈이 적습니다. GM의 '박리다매'는 명백한 수익 손실입니다.")
-                else: st.warning("가격 저항이 존재합니다. 단가 인상 시 정밀한 타겟 마케팅이 병행되어야 합니다.")
-        except: st.info("탄력성 분석을 위한 데이터가 충분하지 않습니다.")
-
-    st.subheader("2️⃣ 경쟁사 가격 격차 분석 (Price Gap Boundary)")
-    try:
-        comp_cols = [h for h in ['Parnas_Jeju', 'Grand_Josun'] if h in daily_pms.columns]
-        if comp_cols:
-            avg_comp_price = daily_pms[comp_cols].mean(axis=1).mean()
-            price_gap = current_adr_actual - avg_comp_price
-            
-            col_g1, col_g2, col_g3 = st.columns(3)
-            col_g1.metric("경쟁사 평균 요금", f"₩{int(avg_comp_price):,}")
-            col_g2.metric("엠버 현재 ADR", f"₩{int(current_adr_actual):,}")
-            col_g3.metric("가격 격차 (Gap)", f"₩{int(price_gap):,}", delta="시장 우위" if price_gap < 0 else "프리미엄 포지셔닝")
-            
-            if price_gap > 50000: st.error("🚨 경고: 경쟁사 대비 가격이 너무 높습니다. 예약 속도가 둔화될 임계점에 도달했습니다.")
-            elif price_gap < -30000: st.success("📢 기회: 경쟁사 대비 저렴합니다. 즉시 단가를 상향하여 수익을 보전해야 합니다.")
-    except: st.info("경쟁사 가격 격차를 분석할 크롤링 데이터가 없습니다.")
-
-    # [3] 조기 완판의 기회비용 (The Early Sellout Penalty)
-    st.subheader("3️⃣ 조기 완판 기회비용 (Opportunity Cost of Early Sellout)")
-    V_C = 50000 
-    
-    if not df_full_pms.empty:
-        c_tp = find_column(df_full_pms, ['객실타입', '룸타입', 'RoomType'])
-        if c_tp:
-            target_df['LeadTime'] = (target_df['Stay_Date'] - target_df['Temp_Bk']).dt.days
-            
-            # 💡 [아키텍트 패치] 데이터 팽창(Explode) 시 1박 요금을 그대로 썼으므로 Daily_Rev = ADR
-            target_df['Booking_ADR'] = target_df['Daily_Rev'] 
-            
-            def calculate_lost_revenue(row):
-                if row['LeadTime'] <= 14: return 0.0
-                
-                # 💡 [핵심 가드레일] 조식비/세금/보조금 등 15만 원 미만의 가짜 객실료 데이터 필터링!
-                if row['Booking_ADR'] < 150000: return 0.0
-                
-                r_type = str(row[c_tp]).strip()
-                d_in = row['Stay_Date']
-                
-                try: type_code, season, is_weekend = get_season_details(d_in)
-                except: return 0.0 
-                
-                base_price = 0
-                if r_type in DYNAMIC_ROOMS:
-                    # 해당 시즌의 가장 낮은 티어(BAR8)를 기준으로 하한선 설정
-                    base_price = PRICE_TABLE.get(r_type, {}).get("BAR8", 300000)
-                elif r_type in FIXED_ROOMS:
-                    base_price = FIXED_PRICE_TABLE.get(r_type, {}).get(type_code, 250000)
-                else: 
-                    base_price = 300000
+                if not df_pace.empty:
+                    df_pace['booking_order'] = df_pace['lead_time'] * -1 
+                    pace_chart_data = df_pace.groupby(['checkin_month', 'booking_order'])['revenue'].sum().reset_index()
+                    pace_chart_data = pace_chart_data.sort_values(['checkin_month', 'booking_order'])
+                    pace_chart_data['cum_revenue'] = pace_chart_data.groupby('checkin_month')['revenue'].cumsum()
                     
-                # 아키텍트의 마지노선: 최저가(BAR8)의 85% (이보다 낮으면 덤핑으로 간주)
-                floor_limit = base_price * 0.85 
-                
-                # 실제 판매가(Booking_ADR)가 마지노선보다 낮다면 차액만큼 기회비용 발생
-                if row['Booking_ADR'] < floor_limit:
-                    return (floor_limit - row['Booking_ADR']) * row['Daily_RN']
-                return 0.0
+                    fig_pace = px.line(pace_chart_data, x='booking_order', y='cum_revenue', color='checkin_month',
+                                    title="월별 누적 매출 달성 곡선 (J-Curve)", line_shape='spline')
+                    fig_pace.update_xaxes(range=[-180, 0]) 
+                    st.plotly_chart(fig_pace, use_container_width=True)
 
-            target_df['Lost_Revenue'] = target_df.apply(calculate_lost_revenue, axis=1)
-            cheap_early_birds = target_df[target_df['Lost_Revenue'] > 0]
-            
-            early_rn = cheap_early_birds['Daily_RN'].sum()
-            # 💡 평균 단가 계산 시 mean()을 사용하여 정확도 상승
-            early_adr = cheap_early_birds['Booking_ADR'].mean() if early_rn > 0 else 0
-            total_lost_revenue = cheap_early_birds['Lost_Revenue'].sum()
+                col_detail1, col_detail2 = st.columns(2)
+                with col_detail1:
+                    st.subheader("💰 리드타임별 객단가(ADR)")
+                    bins = [-1, 0, 3, 7, 14, 30, 60, 90, 180, 365]
+                    labels = ['DayOf', '0-3일', '4-7일', '8-14일', '15-30일', '31-60일', '61-90일', '90-180일', '180일+']
+                    df_h['lead_grp'] = pd.cut(df_h['lead_time'], bins=bins, labels=labels)
+                    grp_stats = df_h.groupby('lead_grp', observed=False).agg(adr=('revenue', 'mean'), count=('revenue', 'count')).reset_index()
+                    
+                    fig_lead = make_subplots(specs=[[{"secondary_y": True}]])
+                    fig_lead.add_trace(go.Bar(x=grp_stats['lead_grp'], y=grp_stats['count'], name="예약 건수", marker_color='#AEC7E8'), secondary_y=False)
+                    fig_lead.add_trace(go.Scatter(x=grp_stats['lead_grp'], y=grp_stats['adr'], name="평균 ADR", line=dict(color='#FF7F0E', width=3)), secondary_y=True)
+                    st.plotly_chart(fig_lead, use_container_width=True)
 
-            c_l1, c_l2 = st.columns(2)
-            with c_l1:
-                st.metric("마지노선 이탈 덤핑 객실", f"{int(early_rn):,} RN", "적정 하한가 미달 판매량")
-                st.metric("해당 물량 평균 판매가", f"₩{int(early_adr):,}")
-            with c_l2:
-                st.metric("⚠️ 누적 기회비용 손실액", f"₩{int(total_lost_revenue):,}", "정상가 방어 시 추가 확보 가능 수익", delta_color="inverse")
-                
-                # 프로그레스 바 에러 방지 (최대 1.0 초과 시 오류 나므로 min 처리)
-                st.progress(min(1.0, total_lost_revenue / 100000000))
-                
-                st.write(f"📢 **결론:** D-14 이전에 적정가 대비 과도하게 할인된 **{int(early_rn):,}실**을 최소한의 마지노선(BAR8 수준)으로만 방어했어도, **₩{int(total_lost_revenue):,}**의 수익을 더 남길 수 있었습니다.")
-        else: 
-            st.info("객실타입 컬럼을 찾을 수 없어 기회비용 정밀 분석이 불가능합니다.")
-            
-    st.markdown("---")
-    st.subheader("🏟️ 최종 전략 시뮬레이션: GM vs Architect")
-    
-    base_gross = current_rev_total
-    base_rn = current_rn_total
-    base_adr = current_adr_actual
-    base_net = base_gross - (base_rn * V_C) if 'V_C' in locals() else base_gross - (base_rn * 50000)
+                with col_detail2:
+                    st.subheader("🍕 채널(거래처) 성과")
+                    if '거래처' in df_h.columns:
+                        top_ch = df_h['거래처'].value_counts().nlargest(10).index
+                        df_h['channel_sim'] = df_h['거래처'].apply(lambda x: x if x in top_ch else '기타')
+                        ch_stats = df_h.groupby('channel_sim').agg(rev=('revenue', 'sum'), adr=('revenue', 'mean')).reset_index()
+                        fig_ch = px.treemap(ch_stats, path=['channel_sim'], values='rev', color='adr', color_continuous_scale='RdBu')
+                        st.plotly_chart(fig_ch, use_container_width=True)
 
-    st.markdown("### 🛠️ 단가-물량-수익 상관 시뮬레이션")
-    cs1, cs2, cs3 = st.columns(3)
-    with cs1: sim_adr = st.number_input("💡 가상 타겟 ADR (원)", min_value=50000, value=int(base_adr) if base_adr > 0 else int(tgt_m['adr']))
-    with cs2: sim_rn_pct = st.slider("📉 예상 물량 변동률 (%)", -50, 50, 0)
-    with cs3: sim_ota_share = st.slider("💸 OTA 비중 (%)", 0, 100, 70)
+                st.markdown("---")
+                st.subheader("📅 요일별/월별 예약 집중도")
+                if not df_h.empty:
+                    heat_data = df_h.groupby(['checkin_month', 'checkin_day'])['revenue'].count().reset_index()
+                    days_ord = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                    fig_heat = px.density_heatmap(heat_data, x='checkin_month', y='checkin_day', z='revenue',
+                                                category_orders={'checkin_day': days_ord}, color_continuous_scale='Greens')
+                    st.plotly_chart(fig_heat, use_container_width=True)
+        else: st.warning("분석할 예약 데이터가 없습니다.")
 
-    ar_rn = base_rn * (1 + sim_rn_pct / 100)
-    ar_gross = sim_adr * ar_rn
-    ar_comm = ar_gross * (sim_ota_share / 100) * 0.15
-    ar_cost = ar_rn * 50000
-    ar_net = ar_gross - ar_comm - ar_cost
-
-    cl, cr = st.columns(2)
-    with cl:
-        st.subheader("👨‍💼 총지배인 정책 (Current)")
-        st.metric("총매출 (Gross)", f"₩{int(base_gross):,}")
-        st.error(f"순수익 (Net): ₩{int(base_net):,}")
-        st.write(f"가동률: {current_occ_pct:.1f}%")
-    with cr:
-        st.subheader("🏛️ 아키텍트 전략 (Proposed)")
-        gain = ar_net - base_net
-        st.metric("가상 총매출 (Gross)", f"₩{int(ar_gross):,}", delta=f"{int(ar_gross - base_gross):+,}")
-        st.success(f"가상 순수익 (Net): ₩{int(ar_net):,}")
-        st.write(f"순수익 증감: **₩{int(gain):+,}**")
-
-    if gain > 0: st.info(f"💡 **최종 검증:** 가동률을 일부 포기하더라도 단가를 상향하는 것이 순수익 면에서 **₩{int(gain):,}** 더 유리합니다. '채우는 것'이 목표가 아니라 '남기는 것'이 목표여야 합니다.")
-    else: st.warning(f"⚠️ **최종 검증:** 현재 설정한 단가와 물량 감소폭으로는 수익 보전이 어렵습니다. 가격 저항선을 다시 확인하십시오.")
-
-    fig_final = px.bar(pd.DataFrame({
-        "Strategy": ["GM Policy", "GM Policy", "Architect", "Architect"],
-        "Metric": ["Gross Revenue", "Net Profit", "Gross Revenue", "Net Profit"],
-        "Amount": [base_gross, base_net, ar_gross, ar_net]
-    }), x="Metric", y="Amount", color="Strategy", barmode="group", template="plotly_dark", color_discrete_sequence=['#9e2a2b', '#00D1FF'])
-    st.plotly_chart(fig_final, use_container_width=True)
-
-with tabs[8]:
-    st.header("🔮 AI 예약 과속 감시")
-    if not df_full_pms.empty:
-        today_now = datetime.now(timezone(timedelta(hours=9))).replace(tzinfo=None)
-        df_r = df_full_pms[df_full_pms['Temp_Bk'] >= (today_now - timedelta(days=7))]
-        if not df_r.empty: 
-            type_c = find_column(df_full_pms, ['객실타입', 'Room'])
-            st.warning("🔥 최근 7일 내 예약이 급증한 일자 리스트입니다. (단가 상향 타겟)")
-            ai_df = df_r.groupby(['Stay_Date', type_c])['Daily_RN'].sum().reset_index()
-            ai_df.columns = ['투숙일자', '객실타입', '최근 7일 유입 객실수(RN)']
-            ai_df['투숙일자'] = ai_df['투숙일자'].dt.strftime('%Y-%m-%d')
-            
-            styled_ai_df = ai_df.style.format({'최근 7일 유입 객실수(RN)': '{:,.0f}'}).bar(subset=['최근 7일 유입 객실수(RN)'], color='#FF4B4B')
-            st.dataframe(styled_ai_df, use_container_width=True, height=350)
-    else: st.info("데이터가 없습니다.")
-
-with tabs[9]:
-    st.header("🎯 Dynamic Seasonality Price Guide")
-    if avail_analysis:
-        reco_df = pd.DataFrame(avail_analysis).sort_values(by='velocity', ascending=False)
-        def oracle_rec(row):
-            if row['velocity'] >= 10: return "🔥 Tier Jump (+2단계)"
-            elif row['velocity'] >= 5: return "⚡ Tier Jump (+1단계)"
-            return "표준 유지"
+    # --- TAB 3: 경쟁사 비교 ---
+    with tab3:
+        st.header("⚔️ 경쟁사 가격 포지셔닝 & 추적")
+        with st.spinner("경쟁사 데이터를 불러오는 중입니다..."):
+            df_c = get_comp_data_only()
         
-        reco_df['전략 제안'] = reco_df.apply(oracle_rec, axis=1)
-        reco_df.rename(columns={'date': '투숙일자', 'type': '객실타입', 'occ_new': '현재 점유율(%)', 'velocity': '가속도(%p)', 'suggested_tier':'제안 티어'}, inplace=True)
+        if not df_c.empty:
+            dates = sorted(df_c['search_date_str'].unique(), reverse=True)
+            global_date = st.session_state.get('global_search_date', '-')
+            
+            latest = global_date if global_date in dates else (dates[0] if dates else "-")
+            st.info(f"💡 현재 화면은 **{latest}**에 수집된 경쟁사 요금 기준입니다.")
+            
+            df_now = df_c[df_c['search_date_str'] == latest].copy()
+            
+            if not df_now.empty:
+                st.subheader("🗺️ 시장 가격 포지셔닝")
+                df_others = df_now[df_now['hotel_name'] != 'Amber_Pure_Hill'].groupby('date')['price'].agg(['min','max','mean']).reset_index()
+                df_amber = df_now[df_now['hotel_name'] == 'Amber_Pure_Hill'][['date','price']].rename(columns={'price':'amber'})
+                df_pos = pd.merge(df_others, df_amber, on='date')
+                
+                fig_p = go.Figure()
+                fig_p.add_trace(go.Scatter(x=df_pos['date'], y=df_pos['max'], mode='lines', line=dict(width=0), showlegend=False))
+                fig_p.add_trace(go.Scatter(x=df_pos['date'], y=df_pos['min'], mode='lines', line=dict(width=0), fill='tonexty', fillcolor='rgba(200,200,200,0.5)', name='경쟁사 범위'))
+                fig_p.add_trace(go.Scatter(x=df_pos['date'], y=df_pos['mean'], line=dict(color='gray', dash='dot'), name='평균'))
+                fig_p.add_trace(go.Scatter(x=df_pos['date'], y=df_pos['amber'], line=dict(color='red', width=3), name='엠버'))
+                st.plotly_chart(fig_p, use_container_width=True)
+                
+                st.subheader("⚡ 경쟁사별 가격 격차 (Price Gap)")
+                df_parnas = df_now[df_now['hotel_name'].str.contains('Parnas')][['date','price']].rename(columns={'price':'parnas'})
+                df_josun = df_now[df_now['hotel_name'].str.contains('Josun')][['date','price']].rename(columns={'price':'josun'})
+                
+                df_gap = pd.merge(df_amber, df_parnas, on='date', how='outer')
+                df_gap = pd.merge(df_gap, df_josun, on='date', how='outer')
+                
+                df_gap['파르나스_Gap'] = df_gap['parnas'] - df_gap['amber']
+                df_gap['그랜드조선_Gap'] = df_gap['josun'] - df_gap['amber']
+                
+                df_gap_melt = df_gap.melt(id_vars=['date'], value_vars=['파르나스_Gap', '그랜드조선_Gap'], var_name='competitor', value_name='gap_amount')
+                fig_gap = px.bar(df_gap_melt, x='date', y='gap_amount', color='competitor', barmode='group',
+                                color_discrete_map={'파르나스_Gap': '#1f77b4', '그랜드조선_Gap': '#2ca02c'})
+                st.plotly_chart(fig_gap, use_container_width=True)
+                
+                st.subheader("🎯 객실별 핀셋 비교")
+                df_detail = df_now[df_now['hotel_name']=='Amber_Pure_Hill']
+                if 'hill_amber_twin' in df_detail.columns:
+                    df_twin = df_detail[['date','hill_amber_twin']].copy()
+                    df_twin['hill_amber_twin'] = pd.to_numeric(df_twin['hill_amber_twin'], errors='coerce')
+                    
+                    df_par_min = df_now[df_now['hotel_name'].str.contains('Parnas')][['date','price']].rename(columns={'price':'파르나스_최저'})
+                    df_jos_min = df_now[df_now['hotel_name'].str.contains('Josun')][['date','price']].rename(columns={'price':'조선_최저'})
+                    
+                    df_m = pd.merge(df_twin, df_par_min, on='date', how='outer')
+                    df_m = pd.merge(df_m, df_jos_min, on='date', how='outer')
+                    st.plotly_chart(px.line(df_m, x='date', y=['hill_amber_twin','파르나스_최저','조선_최저'], markers=True), use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("📉 경쟁사 가격 정책 변화 감지 (Policy Shift)")
+            if len(dates) < 2:
+                st.warning("⚠️ 비교할 과거 데이터가 충분하지 않습니다.")
+            else:
+                col_h1, col_h2, col_h3 = st.columns(3)
+                with col_h1:
+                    default_curr_idx = dates.index(latest) if latest in dates else 0
+                    date_curr = st.selectbox("기준 조회일 (실선)", dates, index=default_curr_idx, key='c_curr')
+                with col_h2:
+                    def_idx = 1 if len(dates) > 1 else 0
+                    date_prev = st.selectbox("과거 조회일 (점선)", dates, index=def_idx, key='c_prev')
+                with col_h3:
+                    avail_hotels = df_c['hotel_name'].unique()
+                    sel_hotels = st.multiselect("비교할 호텔 선택", avail_hotels, default=avail_hotels)
+
+                mask_dates = df_c['search_date_str'].isin([date_curr, date_prev])
+                mask_hotels = df_c['hotel_name'].isin(sel_hotels)
+                df_shift = df_c[mask_dates & mask_hotels].copy()
+                
+                if not df_shift.empty:
+                    if 'hill_amber_twin' in df_shift.columns:
+                        df_shift['hill_amber_twin'] = pd.to_numeric(df_shift['hill_amber_twin'], errors='coerce')
+                        df_shift['price'] = np.where(df_shift['hotel_name'] == 'Amber_Pure_Hill', df_shift['hill_amber_twin'], df_shift['price'])
+                    
+                    df_shift = df_shift.dropna(subset=['price'])
+                    df_shift['조회일'] = pd.to_datetime(df_shift['search_date_str'], format='%Y%m%d').dt.strftime('%m-%d')
+                    df_shift = df_shift.sort_values(['hotel_name', 'date'])
+                    
+                    fig_shift = px.line(df_shift, x='date', y='price', color='hotel_name', line_dash='조회일',
+                                        color_discrete_map={'Amber_Pure_Hill': 'red', 'Parnas_Jeju': 'green', 'Grand_Josun': 'blue'})
+                    fig_shift.update_traces(line=dict(width=2.5))
+                    st.plotly_chart(fig_shift, use_container_width=True)
+        else: st.warning("데이터 없음")
+            
+    # --- TAB 4: 렌터카 ---
+    with tab4:
+        st.header("🚗 렌터카 분석 & 최적 가격 추적")
+        with st.spinner("렌터카 시세를 조회 중입니다..."):
+            df_r = get_rent_data_only()
+            
+        if not df_r.empty:
+            cols_car = ['Ray_Price', 'K5_Price', 'G80_Price']
+            for c in cols_car:
+                if c in df_r.columns: df_r[c] = pd.to_numeric(df_r[c], errors='coerce').fillna(0)
+
+            dates = sorted(df_r['search_date_str'].unique(), reverse=True)
+            global_date = st.session_state.get('global_search_date', '-')
+            
+            latest = global_date if global_date in dates else (dates[0] if dates else "-")
+            st.info(f"💡 현재 화면은 **{latest}**에 수집된 렌터카 시세 기준입니다.")
+            
+            df_curr = df_r[df_r['search_date_str'] == latest].copy()
+
+            if not df_curr.empty:
+                st.subheader(f"📈 차종별 일별 시세")
+                df_melt_curr = df_curr.melt(id_vars=['date'], value_vars=cols_car, var_name='차종', value_name='가격')
+                fig_r1 = px.line(df_melt_curr, x='date', y='가격', color='차종', markers=True,
+                                color_discrete_map={'Ray_Price': '#2ca02c', 'K5_Price': '#1f77b4', 'G80_Price': '#d62728'})
+                st.plotly_chart(fig_r1, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("📉 렌터카 가격 정책 변화 감지 (Policy Shift)")
+            if len(dates) < 2:
+                st.warning("⚠️ 비교할 과거 데이터가 충분하지 않습니다.")
+            else:
+                col_rc1, col_rc2, col_rc3 = st.columns(3)
+                with col_rc1:
+                    default_curr_idx = dates.index(latest) if latest in dates else 0
+                    r_date_curr = st.selectbox("기준 조회일 (실선)", dates, index=default_curr_idx, key='r_curr')
+                with col_rc2:
+                    def_idx = 1 if len(dates) > 1 else 0
+                    r_date_prev = st.selectbox("과거 조회일 (점선)", dates, index=def_idx, key='r_prev')
+                with col_rc3:
+                    sel_cars = st.multiselect("비교할 차종 선택", cols_car, default=['K5_Price'])
+
+                mask_dates = df_r['search_date_str'].isin([r_date_curr, r_date_prev])
+                df_shift_r = df_r[mask_dates].copy()
+                df_shift_r = df_shift_r.melt(id_vars=['date', 'search_date_str'], value_vars=sel_cars, var_name='차종', value_name='가격')
+                df_shift_r = df_shift_r[df_shift_r['차종'].isin(sel_cars)]
+
+                if not df_shift_r.empty:
+                    df_shift_r['조회일'] = pd.to_datetime(df_shift_r['search_date_str'], format='%Y%m%d').dt.strftime('%m-%d')
+                    df_shift_r = df_shift_r.sort_values(['차종', 'date'])
+
+                    fig_shift_r = px.line(df_shift_r, x='date', y='가격', color='차종', line_dash='조회일', markers=True)
+                    fig_shift_r.update_traces(line=dict(width=2))
+                    st.plotly_chart(fig_shift_r, use_container_width=True)
+
+            st.markdown("---")
+            st.subheader("🔥 요일별/일자별 가격 히트맵")
+            if not df_curr.empty:
+                target_car = st.selectbox("분석할 차종을 선택하세요", cols_car, index=1)
+                df_heat = df_curr[['date', target_car]].copy()
+                df_heat['Day'] = df_heat['date'].dt.day_name()
+                
+                days_order = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']
+                fig_heat = px.density_heatmap(df_heat, x='date', y='Day', z=target_car, histfunc='avg', 
+                                            category_orders={'Day': days_order}, color_continuous_scale='RdYlGn_r')
+                st.plotly_chart(fig_heat, use_container_width=True)
+                
+                with st.expander("📊 요일별 가격 분포 자세히 보기 (Box Plot)"):
+                    fig_box = px.box(df_heat, x='Day', y=target_car, points="all", category_orders={'Day': days_order}, color='Day')
+                    st.plotly_chart(fig_box, use_container_width=True)
+
+        else: st.warning("렌터카 데이터가 없습니다.")
+
+    # --- TAB 5: 입도객 분석 ---
+    with tab5:
+        st.header("📊 입도객 분석 (트렌드 & 점유율)")
+        with st.spinner("입도객 및 예약 데이터를 분석 중입니다..."):
+            df_t = get_tourist_data_only()
+            df_h_p = get_db_bookings_only()
         
-        display_cols = ['투숙일자', '객실타입', '현재 점유율(%)', '가속도(%p)', '제안 티어', '전략 제안']
-        styled_reco = reco_df[display_cols].style.format({
-            '현재 점유율(%)': '{:,.1f}', '가속도(%p)': '{:,.1f}'
-        }).map(lambda x: 'background-color: #9e2a2b; color: white; font-weight: bold;' if 'Jump' in str(x) else '', subset=['전략 제안'])
+        if not df_t.empty:
+            if 'date' in df_t.columns:
+                df_t['year'] = df_t['date'].dt.year
+                df_t['month'] = df_t['date'].dt.month
+                df_t['mmdd'] = df_t['date'].dt.strftime('%m-%d')
+            
+            latest_row = df_t.iloc[-1]
+            st.subheader(f"📅 기준일: {latest_row['date'].strftime('%Y-%m-%d')}")
+            
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("총 입도객", f"{int(latest_row['total']):,}명")
+            m2.metric("내국인", f"{int(latest_row['korean']):,}명")
+            m3.metric("외국인", f"{int(latest_row['foreign']):,}명")
+            m4.metric("외국인 비중", f"{latest_row.get('foreign_ratio', 0):.1f}%")
+            
+            st.subheader("📈 내국인 vs 외국인 트렌드 변화")
+            df_melt = df_t.melt(id_vars=['date'], value_vars=['korean', 'foreign'], var_name='Type', value_name='Count')
+            fig_trend = px.area(df_melt, x='date', y='Count', color='Type', title="일별 입도객 구성 추이")
+            st.plotly_chart(fig_trend, use_container_width=True)
+ 
+            st.subheader("🗓️ 연도별 비교 (Seasonality)")
+            df_season = df_t.copy()
+            if 'year' in df_season.columns and 'mmdd' in df_season.columns:
+                df_season['year_str'] = df_season['year'].astype(str)
+                
+                # 🌟 변경점 1: 'mmdd' 대신 시간의 흐름인 'date' 기준으로 정렬하여 꼬임 방지
+                df_season = df_season.sort_values(by='date')
+
+                sub1, sub2 = st.tabs(["총 입도객 비교", "외국인 급증세"])
+                
+                with sub1: 
+                    fig1 = px.line(df_season, x='mmdd', y='total', color='year_str')
+                    # 🌟 변경점 2: categoryorder를 추가하여 가로축이 무조건 01-01부터 순서대로 나오게 쐐기 박기
+                    fig1.update_xaxes(type='category', categoryorder='category ascending')
+                    st.plotly_chart(fig1, use_container_width=True)
+                    
+                with sub2: 
+                    fig2 = px.line(df_season, x='mmdd', y='foreign', color='year_str')
+                    fig2.update_xaxes(type='category', categoryorder='category ascending')
+                    st.plotly_chart(fig2, use_container_width=True)
+                    
+            st.markdown("---")
+            if not df_h_p.empty:
+                df_daily = df_h_p.groupby('입실일자').size().reset_index(name='my_res')
+                df_daily.rename(columns={'입실일자':'date'}, inplace=True)
+                df_share = pd.merge(df_t, df_daily, on='date', how='inner')
+                
+                if not df_share.empty:
+                    st.subheader("📉 시장 수요 vs 예약 상관관계")
+                    st.plotly_chart(px.scatter(df_share, x='total', y='my_res', hover_data=['date']), use_container_width=True)
+                    st.subheader("📅 흐름 비교")
+                    fig_d = make_subplots(specs=[[{"secondary_y": True}]])
+                    fig_d.add_trace(go.Scatter(x=df_share['date'], y=df_share['total'], name='입도객', line=dict(color='gray')), secondary_y=False)
+                    fig_d.add_trace(go.Scatter(x=df_share['date'], y=df_share['my_res'], name='내 예약', line=dict(color='red')), secondary_y=True)
+                    st.plotly_chart(fig_d, use_container_width=True)
+        else: st.warning("입도객 데이터가 없습니다.")
+
+# --- TAB 6: Pace Report ---
+    with tab6:
+        st.header("📜 과거 성과 분석 & Pace Report")
+        with st.spinner("데이터 분석 중..."):
+            df_pace = get_db_bookings_only()
+            df_t = get_tourist_data_only()
         
-        st.dataframe(styled_reco, use_container_width=True, height=400)
-        st.plotly_chart(px.density_heatmap(reco_df, x="투숙일자", y="객실타입", z="가속도(%p)", title="Booking Velocity Heatmap", color_continuous_scale="Reds", template="plotly_dark"), use_container_width=True)
-    else:
-        st.warning("🧐 분석할 재고 데이터가 없습니다.")
+        st.subheader("1. 과거 성과 복기 (Revenue vs Tourist)")
+        if not df_pace.empty and not df_t.empty:
+            df_rev_daily = df_pace.groupby('입실일자')['총금액_숫자'].sum().reset_index(name='daily_rev')
+            df_rev_daily.rename(columns={'입실일자':'date'}, inplace=True)
+            df_backtest = pd.merge(df_rev_daily, df_t, on='date', how='inner')
+            
+            # 🌟 수정 포인트 1: 선이 왔다 갔다 꼬이지 않도록 날짜순으로 확실하게 정렬
+            df_backtest = df_backtest.sort_values('date')
+            
+            if not df_backtest.empty:
+                fig_bt = make_subplots(specs=[[{"secondary_y": True}]])
+                fig_bt.add_trace(go.Bar(x=df_backtest['date'], y=df_backtest['daily_rev'], name="매출", marker_color='#FF4B4B', opacity=0.6), secondary_y=False)
+                fig_bt.add_trace(go.Scatter(x=df_backtest['date'], y=df_backtest['total'], name="총 입도객", line=dict(color='blue')), secondary_y=True)
+                fig_bt.add_trace(go.Scatter(x=df_backtest['date'], y=df_backtest['foreign'], name="외국인", line=dict(color='orange', dash='dot')), secondary_y=True)
+                st.plotly_chart(fig_bt, use_container_width=True)
+            else: st.info("매출과 입도객 날짜가 겹치지 않습니다.")
 
-# --- 5. 하단 공통 구역 (Advanced Pro-Level Simulator) ---
-st.markdown("---")
-st.subheader("🔮 Pro-Level Yield Simulator (가격 저항성 기반 정밀 RM 시뮬레이터)")
-st.markdown("단가를 올리는 시뮬레이션을 통해, 가격 저항에 따른 예약 이탈률(Churn Rate)을 예측하고 **최종 순수익(Net Revenue) 및 타겟 ADR 방어율**을 도출합니다.")
+        st.markdown("---")
+        st.subheader("2. Pace Report (전년 대비 성장 속도)")
+        if not df_pace.empty and '입실일자' in df_pace.columns:
+            df_pace['year'] = df_pace['입실일자'].dt.year
+            df_pace['mmdd'] = df_pace['입실일자'].dt.strftime('%m-%d')
+            this_y, last_y = datetime.now().year, datetime.now().year - 1
+            
+            df_ty = df_pace[df_pace['year']==this_y].groupby('mmdd')['총금액_숫자'].sum().reset_index()
+            df_ly = df_pace[df_pace['year']==last_y].groupby('mmdd')['총금액_숫자'].sum().reset_index()
+            
+            df_ty['cumsum'] = df_ty['총금액_숫자'].cumsum()
+            df_ly['cumsum'] = df_ly['총금액_숫자'].cumsum()
+            
+            # 🌟 수정 포인트 2: outer 병합 시 순서가 뒤죽박죽될 수 있으므로, 반드시 'mmdd'로 정렬한 뒤 ffill(빈칸 채우기)을 해야 정상적으로 선이 이어집니다.
+            df_comp = pd.merge(df_ty, df_ly, on='mmdd', how='outer', suffixes=(f'_{this_y}', f'_{last_y}'))
+            df_comp = df_comp.sort_values('mmdd').ffill().fillna(0)
+            
+            fig_pc = go.Figure()
+            fig_pc.add_trace(go.Scatter(x=df_comp['mmdd'], y=df_comp[f'cumsum_{last_y}'], name=f"{last_y} 누적", line=dict(color='gray', dash='dot')))
+            fig_pc.add_trace(go.Scatter(x=df_comp['mmdd'], y=df_comp[f'cumsum_{this_y}'], name=f"{this_y} 누적", line=dict(color='red', width=3)))
+            
+            # 🌟 수정 포인트 3: 여기서도 가로축을 카테고리로 강제 지정하고 순서를 고정해 줍니다.
+            fig_pc.update_xaxes(type='category', categoryorder='category ascending')
+            
+            st.plotly_chart(fig_pc, use_container_width=True)
 
-c1, c2, c3, c4 = st.columns(4)
-with c1: sim_type = st.selectbox("🎯 타겟 객실 타입", ['FDB', 'FDE', 'HDP', 'HDT', 'HDF', 'PPV'])
-with c2: current_tier = st.selectbox("📉 현재 판매 티어", ['BAR8', 'BAR7', 'BAR6', 'BAR5', 'BAR4', 'BAR3'], index=0)
-with c3: target_tier = st.selectbox("📈 목표 상향 티어", ['BAR7', 'BAR6', 'BAR5', 'BAR4', 'BAR3', 'BAR2', 'BAR1'], index=2)
-with c4: comp_adr = st.number_input("⚔️ 주변 경쟁사 최저가 (원)", value=380000, step=10000)
+    # --- TAB 7: 전략 사령부 (BI) ---
+    with tab7:
+        st.header("🎯 180일 수익 최적화 & 인사이트")
+        st.caption("모든 데이터를 통합 분석하고, 전략을 저장/비교합니다.")
+        
+        global_date = st.session_state.get('global_search_date', '-')
+        
+        with st.spinner("전략 데이터를 통합하는 중입니다..."):
+            df_f = get_flight_data_only()
+            df_c = get_comp_data_only()
+            df_r = get_rent_data_only()
+            df_uploaded = st.session_state.get('otb_data', pd.DataFrame())
 
-c5, c6, c7, c8 = st.columns(4)
-with c5: est_rn = st.number_input("📅 타겟 기간 예상 판매 객실수(RN)", value=50, step=5)
-with c6: elasticity = st.select_slider("📉 수요 탄력성 (가격 저항)", options=['낮음(비탄력)', '보통', '높음(탄력)'], value='보통')
-with c7: st.markdown("<br>", unsafe_allow_html=True); run_sim = st.button("🚀 시뮬레이션 가동", use_container_width=True)
+        if not df_f.empty: 
+            latest_f = global_date if global_date in df_f['search_date_str'].values else df_f['search_date_str'].max()
+            df_f = df_f[df_f['search_date_str'] == latest_f].groupby('date')['min_price'].min().reset_index().rename(columns={'min_price': '항공권'})
+        
+        if not df_r.empty:
+            latest_r = global_date if global_date in df_r['search_date_str'].values else df_r['search_date_str'].max()
+            df_r = df_r[df_r['search_date_str'] == latest_r].groupby('date')['K5_Price'].mean().reset_index().rename(columns={'K5_Price': '렌터카'})
+            
+        df_p, df_j, df_a = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        if not df_c.empty:
+            latest_c = global_date if global_date in df_c['search_date_str'].values else df_c['search_date_str'].max()
+            df_c_filtered = df_c[df_c['search_date_str'] == latest_c]
+            df_p = df_c_filtered[df_c_filtered['hotel_name'].str.contains('Parnas')].groupby('date')['price'].min().reset_index().rename(columns={'price': '파르나스'})
+            df_j = df_c_filtered[df_c_filtered['hotel_name'].str.contains('Josun')].groupby('date')['price'].min().reset_index().rename(columns={'price': '그랜드조선'})
+            df_a = df_c_filtered[df_c_filtered['hotel_name'].str.contains('Amber')].groupby('date')['hill_amber_twin'].min().reset_index().rename(columns={'hill_amber_twin': '엠버트윈'})
 
-if run_sim:
-    cur_price = PRICE_TABLE.get(sim_type, {}).get(current_tier, 0)
-    tgt_price = PRICE_TABLE.get(sim_type, {}).get(target_tier, 0)
-
-    if cur_price > 0:
-        price_gap_ratio = max(0, (tgt_price - cur_price) / cur_price)
-        comp_gap_ratio = max(0, (tgt_price - comp_adr) / comp_adr)
-
-        e_factor = {'낮음(비탄력)': 0.5, '보통': 1.0, '높음(탄력)': 1.8}[elasticity]
-        churn_rate = min(1.0, (price_gap_ratio * 0.4 + comp_gap_ratio * 0.6) * e_factor)
-
-        lost_rn = int(est_rn * churn_rate)
-        final_rn = est_rn - lost_rn
-
-        cur_rev = cur_price * est_rn
-        final_rev = tgt_price * final_rn
-        net_gain = final_rev - cur_rev
-
-        st.markdown("#### 📊 Displacement Analysis Report (이탈 객실 vs 최종 수익)")
-        r1, r2, r3, r4 = st.columns(4)
-        r1.metric("현재 예상 매출 (상향 전)", f"₩{int(cur_rev):,}", f"단가 ₩{cur_price:,}")
-        r2.metric("예상 이탈 객실 (Churn)", f"-{lost_rn} RN", f"이탈률 {churn_rate*100:.1f}%", delta_color="inverse")
-        r3.metric("최종 판매 예상 (상향 후)", f"{final_rn} RN", f"단가 ₩{tgt_price:,}")
-        r4.metric("💰 최종 넷 레비뉴 (Net Gain)", f"₩{int(final_rev):,}", f"{int(net_gain):,} 원")
-
-        if net_gain > 0:
-            st.success(f"✅ **[진행 권장]** 객실을 **{lost_rn}개 덜 팔더라도**, 단가 상승분이 볼륨 손실을 압도하여 최종적으로 **+{int(net_gain):,}원**의 추가 이익이 발생합니다. 이는 목표 ADR을 견인하는 핵심 동력이 됩니다.")
+        TOTAL_ROOMS = 128
+        if not df_uploaded.empty:
+            master = df_uploaded.copy()
+            master['date'] = pd.to_datetime(master['date']).dt.tz_localize(None).dt.normalize()
+            master['otb_revenue'] = pd.to_numeric(master['otb_revenue'], errors='coerce').fillna(0)
+            master['rooms_sold'] = pd.to_numeric(master['rooms_sold'], errors='coerce').fillna(0)
+            master['occ'] = (master['rooms_sold'] / TOTAL_ROOMS) * 100
+            master['adr'] = master.apply(lambda x: x['otb_revenue'] / x['rooms_sold'] if x['rooms_sold'] > 0 else 0, axis=1)
+            
+            min_d, max_d = master['date'].min().strftime('%Y-%m-%d'), master['date'].max().strftime('%Y-%m-%d')
+            st.success(f"✅ 데이터 로드 성공: **{min_d}** 부터 **{max_d}** 까지 (총 {len(master):,}일)")
         else:
-            st.error(f"⚠️ **[진행 보류]** 가격 저항과 경쟁사 단가({comp_adr:,}원)에 밀려, 단가를 올릴 경우 방이 안 팔려 오히려 **{int(net_gain):,}원**의 손실이 발생합니다. 이 구간은 가격 방어선을 유지하세요.")
-    else:
-        st.error(f"⚠️ {sim_type} 객실의 {current_tier} 가격 정보가 존재하지 않습니다.")
+            master = pd.DataFrame({'date': pd.date_range(start=datetime.now().date(), periods=180)})
+            master['date'] = pd.to_datetime(master['date']).dt.normalize()
 
+        for part in [df_f, df_p, df_j, df_a, df_r]:
+            if not part.empty: master = pd.merge(master, part, on='date', how='outer')
+        
+        df_view = master.sort_values('date').fillna(0)
+
+        # 전략 저장 버튼
+        st.markdown("---")
+        c_save1, c_save2 = st.columns([4, 1])
+        with c_save2:
+            if st.button("💾 오늘의 전략 저장 (DB)", type="primary", use_container_width=True):
+                try:
+                    save_df = df_view.copy()
+                    save_df['date'] = save_df['date'].dt.strftime('%Y-%m-%d')
+                
+                    doc_id = datetime.now().strftime("%Y-%m-%d_%H%M")
+                    db_flight.collection('strategy_history').document(doc_id).set({
+                        'created_at': datetime.now(),
+                        'data': save_df.to_dict('records')
+                    })
+                    st.success(f"✅ 저장 완료! (ID: {doc_id})")
+                    time.sleep(1)
+                    st.rerun() 
+                except Exception as e:
+                    st.error(f"저장 실패: {e}")
+        st.markdown("---")
+
+        if not df_uploaded.empty:
+            # 1. 버짓 달성률
+            st.subheader("📊 월별 버짓 달성 현황")
+            BUDGET_DATA = {
+                1:  {"rev": 514992575,  "rn": 2270, "adr": 226869, "occ": 56.3},
+                2:  {"rev": 786570856,  "rn": 2577, "adr": 305227, "occ": 70.8},
+                3:  {"rev": 529599040,  "rn": 2248, "adr": 235587, "occ": 55.8},
+                4:  {"rev": 695351004,  "rn": 2414, "adr": 288049, "occ": 61.9},
+                5:  {"rev": 903705440,  "rn": 3082, "adr": 293220, "occ": 76.5},
+                6:  {"rev": 808203820,  "rn": 2776, "adr": 291140, "occ": 71.2},
+                7:  {"rev": 1231949142, "rn": 3671, "adr": 335590, "occ": 91.1},
+                8:  {"rev": 1388376999, "rn": 3873, "adr": 358476, "occ": 96.1},
+                9:  {"rev": 952171506,  "rn": 2932, "adr": 324752, "occ": 75.2},
+                10: {"rev": 897171539,  "rn": 3009, "adr": 298163, "occ": 74.7},
+                11: {"rev": 667146771,  "rn": 2402, "adr": 277746, "occ": 61.6},
+                12: {"rev": 804030110,  "rn": 2765, "adr": 290788, "occ": 68.6}
+            }
+            
+            avail_months = sorted(df_view['date'].dt.month.unique())
+            if not avail_months: avail_months = [datetime.now().month]
+            
+            sel_month = st.selectbox("월 선택 (1월, 2월...)", avail_months)
+            m_data = df_view[df_view['date'].dt.month == sel_month]
+            
+            if not m_data.empty and sel_month in BUDGET_DATA:
+                bg = BUDGET_DATA[sel_month]
+                c_rev, c_rn = m_data['otb_revenue'].sum(), m_data['rooms_sold'].sum()
+                c_adr = c_rev/c_rn if c_rn>0 else 0
+                c_occ = m_data['occ'].mean()
+                
+                b1,b2,b3,b4 = st.columns(4)
+                b1.metric("매출 달성률", f"{(c_rev/bg['rev'])*100:.1f}%", f"{int(c_rev):,}원")
+                b2.metric("RN 달성률", f"{(c_rn/bg['rn'])*100:.1f}%", f"{int(c_rn):,}박")
+                b3.metric("ADR", f"{int(c_adr):,}원", f"{int(c_adr-bg['adr']):,}원")
+                b4.metric("OCC", f"{c_occ:.1f}%", f"목표 {bg['occ']}%")
+            
+            st.markdown("---")
+            
+            # 2. 마켓 레이더
+            st.subheader("🧠 전략 인사이트")
+            if '항공권' in df_view.columns and '렌터카' in df_view.columns:
+                df_view['pressure'] = (df_view['항공권']*df_view['렌터카'])/((TOTAL_ROOMS-df_view['rooms_sold']).replace(0,1))
+                if df_view['pressure'].max() > 0: df_view['pressure'] = (df_view['pressure']/df_view['pressure'].max())*100
+                else: df_view['pressure'] = 0
+            
+            if '파르나스' in df_view.columns:
+                df_view['comp_avg'] = df_view[['파르나스','그랜드조선']].mean(axis=1)
+                df_view['leak'] = ((df_view['comp_avg']*0.85)-df_view['adr'])*df_view['rooms_sold']
+                df_view['leak'] = df_view['leak'].apply(lambda x: x if x>0 else 0)
+                
+                if df_view['leak'].sum() > 0:
+                    leak_d = df_view.loc[df_view['leak'].idxmax()]
+                    st.error(f"🩸 {leak_d['date'].strftime('%m/%d')} 기회비용 경보: {int(leak_d['leak']):,}원 손실 예상")
+
+            t1, t2, t3 = st.tabs(["손실 방어", "수요 파도", "시장 방어"])
+            with t1: 
+                if 'leak' in df_view.columns: st.plotly_chart(go.Figure([go.Bar(x=df_view['date'], y=df_view['otb_revenue'], name='매출'), go.Bar(x=df_view['date'], y=df_view['leak'], name='손실')]).update_layout(barmode='stack'), use_container_width=True)
+            with t2:
+                if '항공권' in df_view.columns: st.plotly_chart(make_subplots(specs=[[{"secondary_y":True}]]).add_trace(go.Scatter(x=df_view['date'], y=df_view['항공권'], name='항공'), secondary_y=False).add_trace(go.Scatter(x=df_view['date'], y=df_view['occ'], name='OCC'), secondary_y=True), use_container_width=True)
+            with t3:
+                if 'comp_avg' in df_view.columns: st.plotly_chart(px.scatter(df_view, x='comp_avg', y='adr', color='occ'), use_container_width=True)
+
+            st.markdown("---")
+            
+            # 3. 심층 인사이트
+            st.subheader("💡 데이터 심층 인사이트")
+            t1, t2 = st.tabs(["💰 가격 민감도", "📅 요일별 패턴"])
+            with t1:
+                if not m_data.empty: st.plotly_chart(px.scatter(m_data, x='adr', y='occ', hover_data=['date'], title="ADR vs OCC 상관관계"), use_container_width=True)
+            with t2:
+                if not m_data.empty:
+                    d = m_data.copy()
+                    d['Day'] = d['date'].dt.day_name()
+                    st.plotly_chart(px.box(d, x='Day', y='otb_revenue', title="요일별 매출 분포", category_orders={"Day": ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday']}), use_container_width=True)
+            
+            st.markdown("---")
+            
+            # 4. 수익 최적화 & ADR 워룸 
+            st.subheader("💰 [ADR 워룸] 가격 결정 시뮬레이터")
+            st.caption("현재 예약 속도(Pace)와 잔여 수요를 기반으로, 가격 변경 시의 최종 성과를 예측합니다.")
+            
+            def get_pace_rate(days_left):
+                if days_left <= 0: return 1.0
+                elif days_left <= 3: return 0.95
+                elif days_left <= 7: return 0.85
+                elif days_left <= 14: return 0.70
+                elif days_left <= 30: return 0.50
+                elif days_left <= 60: return 0.30
+                else: return 0.15
+
+            war1, war2 = st.columns([1, 2])
+            
+            with war1:
+                target_date = st.date_input("타겟 날짜 선택", value=datetime.now().date() + timedelta(days=7), min_value=datetime.now().date())
+                t_row = df_view[df_view['date'] == pd.to_datetime(target_date)]
+                
+                curr_sold = int(t_row['rooms_sold'].values[0]) if not t_row.empty else 0
+                curr_rev = int(t_row['otb_revenue'].values[0]) if not t_row.empty else 0
+                curr_adr_d = t_row['adr'].values[0] if not t_row.empty else 0
+                
+                parnas_p = t_row['파르나스'].values[0] if '파르나스' in t_row.columns and t_row['파르나스'].values[0] > 0 else 0
+                josun_p = t_row['그랜드조선'].values[0] if '그랜드조선' in t_row.columns and t_row['그랜드조선'].values[0] > 0 else 0
+                
+                st.markdown(f"#### 📅 {target_date.strftime('%m/%d')} 현황")
+                st.info(f"**현재 판매:** {curr_sold}실 / {TOTAL_ROOMS}실 (OCC {curr_sold/TOTAL_ROOMS*100:.1f}%)")
+                st.write(f"**현재 ADR:** {int(curr_adr_d):,}원")
+                
+                st.markdown("---")
+                st.markdown("#### ⚔️ 경쟁사 요금")
+                if parnas_p > 0: st.write(f"- 파르나스: **{int(parnas_p):,}원** ({int(curr_adr_d - parnas_p):+,}원)")
+                else: st.write("- 파르나스: 데이터 없음")
+                
+                if josun_p > 0: st.write(f"- 그랜드조선: **{int(josun_p):,}원** ({int(curr_adr_d - josun_p):+,}원)")
+                else: st.write("- 그랜드조선: 데이터 없음")
+
+            with war2:
+                st.write("#### 🎚️ 시뮬레이션 설정")
+                col_s1, col_s2 = st.columns(2)
+                with col_s1: raise_amt = st.number_input("가격 조정 (+/- 원)", min_value=-200000, max_value=200000, value=-20000, step=5000)
+                with col_s2: elasticity = st.select_slider("시장 민감도 (가격 반응도)", options=[0.5, 0.8, 1.0, 1.2, 1.5, 2.0, 3.0], value=1.5, format_func=lambda x: f"{x}배 (매우 민감)" if x >= 2.0 else (f"{x}배 (둔감)" if x < 1 else "보통"))
+
+                days_left = (pd.to_datetime(target_date) - datetime.now()).days
+                pace_rate = get_pace_rate(days_left)
+                final_forecast_sold_organic = min(TOTAL_ROOMS, int(curr_sold / pace_rate)) if pace_rate > 0 else curr_sold
+                natural_pickup = max(0, final_forecast_sold_organic - curr_sold)
+                new_adr = curr_adr_d + raise_amt
+                price_change_pct = (raise_amt / curr_adr_d) if curr_adr_d > 0 else 0
+                organic_impact = natural_pickup * (price_change_pct * -1 * elasticity)
+                unsold_inventory = TOTAL_ROOMS - (curr_sold + natural_pickup)
+                
+                new_market_demand = (unsold_inventory * min(0.8, abs(price_change_pct) * elasticity * 2.0)) if raise_amt < 0 else 0
+                adjusted_pickup = max(0, int(natural_pickup + organic_impact + new_market_demand))
+                scenario_final_sold = min(TOTAL_ROOMS, curr_sold + adjusted_pickup)
+                
+                scenario_final_rev = (curr_sold * curr_adr_d) + (adjusted_pickup * new_adr)
+                scenario_final_adr = scenario_final_rev / scenario_final_sold if scenario_final_sold > 0 else 0
+                baseline_rev = final_forecast_sold_organic * curr_adr_d
+
+                st.markdown("#### 🔮 예측 결과 비교")
+                res_col1, res_col2 = st.columns(2)
+                
+                with res_col1:
+                    st.container(border=True).markdown(f"""
+                    **⏸️ 현상 유지 (Baseline)**
+                    - 예상 OCC: **{final_forecast_sold_organic}실** (+{natural_pickup})
+                    - 예상 매출: **{int(baseline_rev):,}원**
+                    - 예상 ADR: **{int(curr_adr_d):,}원**
+                    """)
+                
+                with res_col2:
+                    diff_rev = scenario_final_rev - baseline_rev
+                    diff_occ = scenario_final_sold - final_forecast_sold_organic
+                    st.container(border=True).markdown(f"""
+                    **🚀 가격 변경 시 ({raise_amt:+,}원)**
+                    - 예상 OCC: **{scenario_final_sold}실** ({diff_occ:+,}실)
+                    - 예상 매출: **{int(scenario_final_rev):,}원**
+                    - 예상 ADR: **{int(scenario_final_adr):,}원**
+                    """)
+
+                if diff_rev > 0:
+                    if raise_amt < 0: st.success(f"🔥 **공격적 인하 성공:** 객실을 **{diff_occ}실** 더 채워 매출 **{int(diff_rev):+,}원** 이득입니다.")
+                    else: st.success(f"💰 **고수익 전략 성공:** ADR 상승 효과로 매출이 **{int(diff_rev):+,}원** 증가합니다.")
+                else:
+                    st.error(f"📉 **전략 주의:** 매출이 **{int(diff_rev):+,}원** 감소할 위험이 있습니다.")
+
+            with st.expander("⚔️ AI vs 총지배인 예측 배틀 (펼치기)"):
+                with st.form("battle_v6"):
+                    ai_pred = int(curr_rev / 0.8) if curr_rev > 0 else 0
+                    st.write(f"🤖 AI 마감 예측: **{ai_pred:,} 원**")
+                    gm_input = st.number_input("내 예측 금액 (원)", value=ai_pred, step=100000)
+                    if st.form_submit_button("⚔️ 승부수 던지기"): st.success(f"저장 완료!")
+
+            st.markdown("---")
+            
+            # 5. 180일 종합 추세 
+            st.subheader("📊 180일 종합 추세 & 스냅샷 비교")
+            
+            try:
+                snapshot_list = sorted([doc.id for doc in db_flight.collection('strategy_history').stream()], reverse=True)
+            except: snapshot_list = [] 
+
+            compare_date = st.selectbox("⏳ 과거 저장 시점과 비교하기 (스냅샷 비교)", ["비교 안 함"] + snapshot_list)
+            
+            df_past = pd.DataFrame()
+            if compare_date != "비교 안 함":
+                try:
+                    doc = db_flight.collection('strategy_history').document(compare_date).get()
+                    if doc.exists:
+                        df_past = pd.DataFrame(doc.to_dict().get('data', []))
+                        if not df_past.empty:
+                            df_past['date'] = pd.to_datetime(df_past['date'])
+                            st.info(f"🕰️ **{compare_date}** 시점의 예측 데이터(점선)와 현재(실선)를 비교합니다.")
+                except Exception as e: st.error(f"과거 데이터 로드 실패: {e}")
+
+            v_tab1, v_tab2 = st.tabs(["💰 정규화 추세 (Normalized)", "📈 가격 격차 (Price Gap)"])
+            with v_tab1:
+                df_chart = df_view.copy()
+                comp_list = [c for c in ['파르나스', '그랜드조선'] if c in df_chart.columns]
+                if comp_list: df_chart['경쟁사'] = df_chart[comp_list].mean(axis=1)
+                valid_cols = [c for c in ['otb_revenue', '항공권', '경쟁사', '렌터카'] if c in df_chart.columns]
+                
+                if len(valid_cols) > 1:
+                    from sklearn.preprocessing import MinMaxScaler
+                    df_norm = df_chart.dropna(subset=valid_cols).copy()
+                    if not df_norm.empty:
+                        df_norm[valid_cols] = MinMaxScaler().fit_transform(df_norm[valid_cols])
+                        st.plotly_chart(px.line(df_norm.melt(id_vars=['date'], value_vars=valid_cols), x='date', y='value', color='variable', line_shape='spline'), use_container_width=True)
+
+            with v_tab2:
+                fig_dual = make_subplots(specs=[[{"secondary_y": True}]])
+                if '파르나스' in df_view.columns: fig_dual.add_trace(go.Scatter(x=df_view['date'], y=df_view['파르나스'], name='파르나스', line=dict(color='green', width=1.5)), secondary_y=True)
+                if '그랜드조선' in df_view.columns: fig_dual.add_trace(go.Scatter(x=df_view['date'], y=df_view['그랜드조선'], name='그랜드조선', line=dict(color='blue', width=1.5)), secondary_y=True)
+                if '엠버트윈' in df_view.columns: fig_dual.add_trace(go.Scatter(x=df_view['date'], y=df_view['엠버트윈'], name='엠버트윈', line=dict(color='orange', width=2, dash='dot')), secondary_y=True)
+                fig_dual.add_trace(go.Scatter(x=df_view['date'], y=df_view['otb_revenue'], name='우리 매출(현재)', line=dict(color='red', width=3)), secondary_y=False)
+                
+                if not df_past.empty and 'otb_revenue' in df_past.columns:
+                    fig_dual.add_trace(go.Scatter(x=df_past['date'], y=df_past['otb_revenue'], name=f'매출({compare_date})', line=dict(color='gray', width=2, dash='dash')), secondary_y=False)
+                
+                fig_dual.update_layout(title="매출(좌) vs 경쟁사 가격(우) 이중축 비교", height=500, yaxis2=dict(title="가격(원)", overlaying='y', side='right'))
+                st.plotly_chart(fig_dual, use_container_width=True)
+            
+            st.download_button("📥 통합 데이터 다운로드", df_view.to_csv().encode('utf-8-sig'), "data.csv")
+
+        else:
+            st.info("💡 좌측 패널에서 온북 엑셀 파일을 업로드하시면 엠버 OTB 및 전체 전략 분석이 활성화됩니다.")

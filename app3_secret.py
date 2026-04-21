@@ -1243,32 +1243,43 @@ with tabs[1]:
         st.subheader("🍕 채널별 수익 기여도 (Channel Mix & Profitability)")
         st.info("💡 **[Channel Mix]** 어떤 거래처가 가장 돈이 되는지(매출 점유율)를 직관적으로 분석합니다.")
         
-        if 'real_channel_df' in locals() and real_channel_df is not None and not real_channel_df.empty:
-            c_col = real_channel_df.columns[0]
-            r_col = real_channel_df.columns[1]
+        # 💡 국내외 PMS에서 자주 쓰는 채널 컬럼명 후보군을 모두 탐색합니다.
+        possible_cols = ['거래처', '예약처', '거래처명', '채널', '예약경로', 'Channel', 'Agency', 'Agent', 'Source', '대행사']
+        ch_col = None
+        
+        if not df_full_pms.empty:
+            for col in possible_cols:
+                if col in df_full_pms.columns:
+                    ch_col = col
+                    break
+        
+        if ch_col and not df_full_pms.empty:
+            ch_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].groupby(ch_col)['Daily_Rev'].sum().reset_index()
+            ch_df = ch_df[ch_df['Daily_Rev'] > 0]
             
-            fig4 = px.pie(real_channel_df, values=r_col, names=c_col, hole=0.5, 
-                          color_discrete_sequence=px.colors.sequential.Tealgrn)
-            fig4.update_traces(textposition='inside', textinfo='percent+label')
-            fig4.update_layout(template="plotly_dark", height=400,
-                               annotations=[dict(text='Channel<br>Mix', x=0.5, y=0.5, font_size=20, showarrow=False)])
-            st.plotly_chart(fig4, use_container_width=True)
-        else:
-            # Fallback: df_full_pms에서 거래처/Channel 컬럼을 찾아 Treemap으로 우아하게 그려줍니다.
-            ch_col = 'Channel' if 'Channel' in df_full_pms.columns else ('거래처' if '거래처' in df_full_pms.columns else None)
-            if ch_col and not df_full_pms.empty:
-                ch_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].groupby(ch_col)['Daily_Rev'].sum().reset_index()
-                ch_df = ch_df[ch_df['Daily_Rev'] > 0]
-                
-                if not ch_df.empty:
-                    fig4 = px.treemap(ch_df, path=[ch_col], values='Daily_Rev', color='Daily_Rev', 
-                                      color_continuous_scale='Viridis')
-                    fig4.update_layout(template="plotly_dark", height=400)
-                    st.plotly_chart(fig4, use_container_width=True)
+            if not ch_df.empty:
+                # 거래처가 너무 많을 경우를 대비해 매출액 기준 상위 15개만 묶어서 보여줍니다.
+                top_ch = ch_df.nlargest(15, 'Daily_Rev')
+                if len(ch_df) > 15:
+                    other_rev = ch_df[~ch_df[ch_col].isin(top_ch[ch_col])]['Daily_Rev'].sum()
+                    other_df = pd.DataFrame({ch_col: ['기타 (Others)'], 'Daily_Rev': [other_rev]})
+                    final_ch_df = pd.concat([top_ch, other_df])
                 else:
-                    st.warning("분석할 채널 실적이 아직 없습니다.")
+                    final_ch_df = top_ch
+                
+                fig4 = px.treemap(final_ch_df, path=[ch_col], values='Daily_Rev', color='Daily_Rev', 
+                                  color_continuous_scale='Viridis', title=f"[{ch_col}] 기준 매출 점유율 (Treemap)")
+                fig4.update_layout(template="plotly_dark", height=450, margin=dict(t=50, l=10, r=10, b=10))
+                st.plotly_chart(fig4, use_container_width=True)
             else:
-                st.warning("채널/거래처 데이터를 찾을 수 없습니다. (데이터 양식을 확인해주세요)")
+                st.warning("분석할 채널 실적이 아직 없습니다.")
+        else:
+            st.warning("⚠️ 업로드하신 PMS 파일에서 '채널/거래처'를 나타내는 컬럼명을 자동으로 찾지 못했습니다.")
+            with st.expander("🔍 내 엑셀 파일의 실제 컬럼명 확인하기 (클릭)"):
+                if not df_full_pms.empty:
+                    st.write("아래 목록 중 채널(예: 아고다, 네이버 등)이 들어있는 컬럼이름을 확인해주세요.")
+                    st.info(list(df_full_pms.columns))
+                    st.caption("확인하신 후 코드의 `possible_cols` 목록에 그 이름을 추가하시면 차트가 정상적으로 뜹니다!")
 
     with tabs[4]:
         st.subheader(f"🔮 {selected_month}월 매출 마감 예보 시뮬레이션")

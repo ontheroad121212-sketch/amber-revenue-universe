@@ -1,0 +1,8 @@
+streamlit
+pandas
+firebase-admin
+openpyxl
+fpdf2
+plotly
+kaleido==0.2.1
+Pillow

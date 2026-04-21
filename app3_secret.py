@@ -1272,154 +1272,149 @@ with tabs[4]:
 with tabs[5]: st.subheader("🌟 리뷰 분석"); st.info("연동 대기 중")
 
 with tabs[6]:
-    st.subheader("🛰️ 외부 시장 지표 감시 및 매출 상관관계 (Market Correlation)")
-    st.info("💡 Firebase에서 수집된 실제 크롤링 데이터(항공, 렌터카, 개별 경쟁사)를 가져와 투숙일(Stay Date) 기준으로 분석합니다.")
-    
-    if not df_full_pms.empty and firebase_admin._apps:
-        target_df_corr = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
-        if not target_df_corr.empty:
-            daily_pms = target_df_corr.groupby(target_df_corr['Stay_Date'].dt.date).agg(
-                rev=('Daily_Rev', 'sum'),
-                rn=('Daily_RN', 'sum')
-            ).reset_index()
-            daily_pms.rename(columns={'Stay_Date': 'date'}, inplace=True)
-            daily_pms['date'] = pd.to_datetime(daily_pms['date'])
-            daily_pms['adr'] = daily_pms['rev'] / daily_pms['rn']
-            daily_pms['adr'] = daily_pms['adr'].fillna(0)
-            
-            # 🔥 크롤링 데이터는 기본 앱(firebase_admin)에서 가져옴 (기존 로직 유지)
-            try:
-                db = firestore.client()
-            except:
-                db = None
-            
-            flight_data, rental_data, comp_data = [], [], []
-            month_prefix = f"2026-{selected_month:02d}"
-            
-            if db:
+        st.subheader("🛰️ 외부 시장 지표 감시 및 매출 상관관계 (Market Correlation)")
+        st.info("💡 Firebase에서 수집된 실제 크롤링 데이터(항공, 렌터카, 개별 경쟁사)를 가져와 투숙일(Stay Date) 기준으로 분석합니다.")
+        
+        if not df_full_pms.empty and firebase_admin._apps:
+            target_df_corr = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
+            if not target_df_corr.empty:
+                daily_pms = target_df_corr.groupby(target_df_corr['Stay_Date'].dt.date).agg(
+                    rev=('Daily_Rev', 'sum'),
+                    rn=('Daily_RN', 'sum')
+                ).reset_index()
+                daily_pms.rename(columns={'Stay_Date': 'date'}, inplace=True)
+                daily_pms['date'] = pd.to_datetime(daily_pms['date'])
+                daily_pms['adr'] = daily_pms['rev'] / daily_pms['rn']
+                daily_pms['adr'] = daily_pms['adr'].fillna(0)
+                
+                # 🔥 크롤링 데이터는 통합된 db_flight (firebase_flight) 앱에서 가져옵니다.
+                flight_data, rental_data, comp_data = [], [], []
+                month_prefix = f"2026-{selected_month:02d}"
+                
+                if db_flight:
+                    try:
+                        flights_ref = db_flight.collection('flight_prices').stream()
+                        for doc in flights_ref:
+                            d = doc.to_dict()
+                            if d.get('date', '').startswith(month_prefix):
+                                flight_data.append({'date': d.get('date'), 'flight_price': d.get('min_price', 0)})
+                                
+                        rentals_ref = db_flight.collection('rental_prices').stream()
+                        for doc in rentals_ref:
+                            d = doc.to_dict()
+                            if d.get('date', '').startswith(month_prefix):
+                                rental_data.append({'date': d.get('date'), 'rental_price': d.get('Ray_Price', 0)})
+                                
+                        comps_ref = db_flight.collection('hotel_comp_prices').stream()
+                        for doc in comps_ref:
+                            d = doc.to_dict()
+                            if d.get('date', '').startswith(month_prefix):
+                                comp_data.append({
+                                    'date': d.get('date'), 
+                                    'hotel_name': d.get('hotel_name', 'Unknown'), 
+                                    'price': d.get('price', 0)
+                                })
+                    except Exception:
+                        pass
+
+                df_flight = pd.DataFrame(flight_data)
+                if not df_flight.empty: df_flight['date'] = pd.to_datetime(df_flight['date'])
+                
+                df_rental = pd.DataFrame(rental_data)
+                if not df_rental.empty: df_rental['date'] = pd.to_datetime(df_rental['date'])
+                
+                df_comp = pd.DataFrame(comp_data)
+                if not df_comp.empty: 
+                    df_comp['date'] = pd.to_datetime(df_comp['date'])
+                    df_comp_pivot = df_comp.pivot_table(index='date', columns='hotel_name', values='price', aggfunc='mean').reset_index()
+                else:
+                    df_comp_pivot = pd.DataFrame()
+
+                if not df_flight.empty: daily_pms = pd.merge(daily_pms, df_flight.groupby('date')['flight_price'].mean().reset_index(), on='date', how='left')
+                else: daily_pms['flight_price'] = 0
+                
+                if not df_rental.empty: daily_pms = pd.merge(daily_pms, df_rental.groupby('date')['rental_price'].mean().reset_index(), on='date', how='left')
+                else: daily_pms['rental_price'] = 0
+                
+                if not df_comp_pivot.empty: 
+                    daily_pms = pd.merge(daily_pms, df_comp_pivot, on='date', how='left')
+                
+                for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill']:
+                    if h not in daily_pms.columns:
+                        daily_pms[h] = 0
+
+                daily_pms.ffill(inplace=True)
+                daily_pms.fillna(0, inplace=True)
+
+                st.markdown("#### 📈 실제 시장 요금 vs 엠버퓨어힐 매출 트렌드")
+                fig_trend = go.Figure()
+                fig_trend.add_trace(go.Bar(x=daily_pms['date'], y=daily_pms['rev'], name="우리 매출(Gross)", opacity=0.4, yaxis='y1', marker_color='#00D1FF'))
+                fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms['flight_price'], name="평균 항공권", mode='lines+markers', yaxis='y2', line=dict(color='#4CAF50')))
+                fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms['rental_price'], name="평균 렌터카", mode='lines+markers', yaxis='y2', line=dict(color='#FFD700')))
+                
+                hotel_colors = {'Parnas_Jeju': '#FF4B4B', 'Grand_Josun': '#9370DB', 'Amber_Pure_Hill': '#FFFFFF'}
+                hotel_labels = {'Parnas_Jeju': '파르나스', 'Grand_Josun': '그랜드조선', 'Amber_Pure_Hill': '엠버퓨어힐(크롤링)'}
+                
+                for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill']:
+                    if h in daily_pms.columns and not daily_pms[h].eq(0).all():
+                        fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms[h], name=hotel_labels.get(h, h), mode='lines+markers', yaxis='y2', line=dict(color=hotel_colors.get(h, '#9e2a2b'))))
+                
+                fig_trend.update_layout(
+                    template="plotly_dark", height=450,
+                    yaxis=dict(title="우측: 매출 (원)", side='right', showgrid=False),
+                    yaxis2=dict(title="좌측: 시장 단가 (원)", overlaying='y', side='left', showgrid=True),
+                    legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+                )
+                st.plotly_chart(fig_trend, use_container_width=True)
+                
+                st.markdown("#### 🔄 핵심 지표 상관계수 (Correlation Coefficient)")
                 try:
-                    flights_ref = db.collection('flight_prices').stream()
-                    for doc in flights_ref:
-                        d = doc.to_dict()
-                        if d.get('date', '').startswith(month_prefix):
-                            flight_data.append({'date': d.get('date'), 'flight_price': d.get('min_price', 0)})
-                            
-                    rentals_ref = db.collection('rental_prices').stream()
-                    for doc in rentals_ref:
-                        d = doc.to_dict()
-                        if d.get('date', '').startswith(month_prefix):
-                            rental_data.append({'date': d.get('date'), 'rental_price': d.get('Ray_Price', 0)})
-                            
-                    comps_ref = db.collection('hotel_comp_prices').stream()
-                    for doc in comps_ref:
-                        d = doc.to_dict()
-                        if d.get('date', '').startswith(month_prefix):
-                            comp_data.append({
-                                'date': d.get('date'), 
-                                'hotel_name': d.get('hotel_name', 'Unknown'), 
-                                'price': d.get('price', 0)
-                            })
+                    corr_cols = ['rev', 'rn', 'adr', 'flight_price', 'rental_price'] + [h for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill'] if h in daily_pms.columns]
+                    corr_df = daily_pms[corr_cols].corr()
+                    
+                    c1, c2, c3 = st.columns(3)
+                    corr_flight = corr_df.loc['rn', 'flight_price'] if 'flight_price' in corr_df else 0
+                    corr_rent = corr_df.loc['rn', 'rental_price'] if 'rental_price' in corr_df else 0
+                    
+                    target_comp = 'Parnas_Jeju' if 'Parnas_Jeju' in corr_df else 'Grand_Josun'
+                    corr_comp = corr_df.loc['adr', target_comp] if target_comp in corr_df else 0
+                    comp_label = "파르나스" if target_comp == 'Parnas_Jeju' else "그랜드조선"
+                    
+                    def get_corr_text(val):
+                        if pd.isna(val): return "데이터 부족"
+                        if val > 0.7: return "매우 강한 양의 상관관계"
+                        elif val > 0.3: return "양의 상관관계"
+                        elif val > -0.3: return "상관관계 미미"
+                        elif val > -0.7: return "음의 상관관계"
+                        else: return "매우 강한 음의 상관관계"
+                        
+                    with c1: st.metric("✈️ 항공권 요금 vs 우리 호텔 판매량(RN)", f"{corr_flight:.2f}", get_corr_text(corr_flight), delta_color="off")
+                    with c2: st.metric("🚗 렌터카 요금 vs 우리 호텔 판매량(RN)", f"{corr_rent:.2f}", get_corr_text(corr_rent), delta_color="off")
+                    with c3: st.metric(f"🏨 {comp_label} 요금 vs 우리 호텔 ADR", f"{corr_comp:.2f}", get_corr_text(corr_comp), delta_color="off")
+                        
+                    st.markdown("---")
+                    st.markdown("#### 🔬 상세 산점도 분석 (Scatter Plot)")
+                    
+                    x_options = ['flight_price', 'rental_price'] + [h for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill'] if h in daily_pms.columns]
+                    x_format = {'flight_price':'평균 항공권 요금', 'rental_price':'평균 렌터카 요금', 'Parnas_Jeju':'파르나스 요금', 'Grand_Josun':'그랜드조선 요금', 'Amber_Pure_Hill':'엠버퓨어힐(크롤링) 요금'}
+                    
+                    x_axis = st.selectbox("X축(원인) 지표 선택", x_options, format_func=lambda x: x_format.get(x, x))
+                    y_axis = st.selectbox("Y축(결과) 지표 선택", ['rn', 'rev', 'adr'], format_func=lambda x: {'rn':'판매 객실수(RN)', 'rev':'총매출(Gross)', 'adr':'엠버퓨어힐 평균 ADR'}[x])
+                    
+                    if not daily_pms[x_axis].eq(0).all():
+                        fig_scatter = px.scatter(daily_pms, x=x_axis, y=y_axis, template="plotly_dark", 
+                                                 title=f"시장 지표에 따른 우리 호텔 실적 변화", opacity=0.7)
+                        fig_scatter.update_traces(marker=dict(size=12, color='#00D1FF'))
+                        st.plotly_chart(fig_scatter, use_container_width=True)
+                    else:
+                        st.warning("해당 지표의 시장 데이터가 아직 수집되지 않았습니다.")
                 except Exception:
                     pass
-
-            df_flight = pd.DataFrame(flight_data)
-            if not df_flight.empty: df_flight['date'] = pd.to_datetime(df_flight['date'])
-            
-            df_rental = pd.DataFrame(rental_data)
-            if not df_rental.empty: df_rental['date'] = pd.to_datetime(df_rental['date'])
-            
-            df_comp = pd.DataFrame(comp_data)
-            if not df_comp.empty: 
-                df_comp['date'] = pd.to_datetime(df_comp['date'])
-                df_comp_pivot = df_comp.pivot_table(index='date', columns='hotel_name', values='price', aggfunc='mean').reset_index()
             else:
-                df_comp_pivot = pd.DataFrame()
-
-            if not df_flight.empty: daily_pms = pd.merge(daily_pms, df_flight.groupby('date')['flight_price'].mean().reset_index(), on='date', how='left')
-            else: daily_pms['flight_price'] = 0
-            
-            if not df_rental.empty: daily_pms = pd.merge(daily_pms, df_rental.groupby('date')['rental_price'].mean().reset_index(), on='date', how='left')
-            else: daily_pms['rental_price'] = 0
-            
-            if not df_comp_pivot.empty: 
-                daily_pms = pd.merge(daily_pms, df_comp_pivot, on='date', how='left')
-            
-            for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill']:
-                if h not in daily_pms.columns:
-                    daily_pms[h] = 0
-
-            daily_pms.ffill(inplace=True)
-            daily_pms.fillna(0, inplace=True)
-
-            st.markdown("#### 📈 실제 시장 요금 vs 엠버퓨어힐 매출 트렌드")
-            fig_trend = go.Figure()
-            fig_trend.add_trace(go.Bar(x=daily_pms['date'], y=daily_pms['rev'], name="우리 매출(Gross)", opacity=0.4, yaxis='y1', marker_color='#00D1FF'))
-            fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms['flight_price'], name="평균 항공권", mode='lines+markers', yaxis='y2', line=dict(color='#4CAF50')))
-            fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms['rental_price'], name="평균 렌터카", mode='lines+markers', yaxis='y2', line=dict(color='#FFD700')))
-            
-            hotel_colors = {'Parnas_Jeju': '#FF4B4B', 'Grand_Josun': '#9370DB', 'Amber_Pure_Hill': '#FFFFFF'}
-            hotel_labels = {'Parnas_Jeju': '파르나스', 'Grand_Josun': '그랜드조선', 'Amber_Pure_Hill': '엠버퓨어힐(크롤링)'}
-            
-            for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill']:
-                if h in daily_pms.columns and not daily_pms[h].eq(0).all():
-                    fig_trend.add_trace(go.Scatter(x=daily_pms['date'], y=daily_pms[h], name=hotel_labels.get(h, h), mode='lines+markers', yaxis='y2', line=dict(color=hotel_colors.get(h, '#9e2a2b'))))
-            
-            fig_trend.update_layout(
-                template="plotly_dark", height=450,
-                yaxis=dict(title="우측: 매출 (원)", side='right', showgrid=False),
-                yaxis2=dict(title="좌측: 시장 단가 (원)", overlaying='y', side='left', showgrid=True),
-                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-            )
-            st.plotly_chart(fig_trend, use_container_width=True)
-            
-            st.markdown("#### 🔄 핵심 지표 상관계수 (Correlation Coefficient)")
-            try:
-                corr_cols = ['rev', 'rn', 'adr', 'flight_price', 'rental_price'] + [h for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill'] if h in daily_pms.columns]
-                corr_df = daily_pms[corr_cols].corr()
-                
-                c1, c2, c3 = st.columns(3)
-                corr_flight = corr_df.loc['rn', 'flight_price'] if 'flight_price' in corr_df else 0
-                corr_rent = corr_df.loc['rn', 'rental_price'] if 'rental_price' in corr_df else 0
-                
-                target_comp = 'Parnas_Jeju' if 'Parnas_Jeju' in corr_df else 'Grand_Josun'
-                corr_comp = corr_df.loc['adr', target_comp] if target_comp in corr_df else 0
-                comp_label = "파르나스" if target_comp == 'Parnas_Jeju' else "그랜드조선"
-                
-                def get_corr_text(val):
-                    if pd.isna(val): return "데이터 부족"
-                    if val > 0.7: return "매우 강한 양의 상관관계"
-                    elif val > 0.3: return "양의 상관관계"
-                    elif val > -0.3: return "상관관계 미미"
-                    elif val > -0.7: return "음의 상관관계"
-                    else: return "매우 강한 음의 상관관계"
-                    
-                with c1: st.metric("✈️ 항공권 요금 vs 우리 호텔 판매량(RN)", f"{corr_flight:.2f}", get_corr_text(corr_flight), delta_color="off")
-                with c2: st.metric("🚗 렌터카 요금 vs 우리 호텔 판매량(RN)", f"{corr_rent:.2f}", get_corr_text(corr_rent), delta_color="off")
-                with c3: st.metric(f"🏨 {comp_label} 요금 vs 우리 호텔 ADR", f"{corr_comp:.2f}", get_corr_text(corr_comp), delta_color="off")
-                    
-                st.markdown("---")
-                st.markdown("#### 🔬 상세 산점도 분석 (Scatter Plot)")
-                
-                x_options = ['flight_price', 'rental_price'] + [h for h in ['Parnas_Jeju', 'Grand_Josun', 'Amber_Pure_Hill'] if h in daily_pms.columns]
-                x_format = {'flight_price':'평균 항공권 요금', 'rental_price':'평균 렌터카 요금', 'Parnas_Jeju':'파르나스 요금', 'Grand_Josun':'그랜드조선 요금', 'Amber_Pure_Hill':'엠버퓨어힐(크롤링) 요금'}
-                
-                x_axis = st.selectbox("X축(원인) 지표 선택", x_options, format_func=lambda x: x_format.get(x, x))
-                y_axis = st.selectbox("Y축(결과) 지표 선택", ['rn', 'rev', 'adr'], format_func=lambda x: {'rn':'판매 객실수(RN)', 'rev':'총매출(Gross)', 'adr':'엠버퓨어힐 평균 ADR'}[x])
-                
-                if not daily_pms[x_axis].eq(0).all():
-                    fig_scatter = px.scatter(daily_pms, x=x_axis, y=y_axis, template="plotly_dark", 
-                                             title=f"시장 지표에 따른 우리 호텔 실적 변화", opacity=0.7)
-                    fig_scatter.update_traces(marker=dict(size=12, color='#00D1FF'))
-                    st.plotly_chart(fig_scatter, use_container_width=True)
-                else:
-                    st.warning("해당 지표의 시장 데이터가 아직 수집되지 않았습니다.")
-            except Exception:
-                pass
+                st.info("해당 월의 PMS 데이터가 부족하여 상관관계를 분석할 수 없습니다.")
         else:
-            st.info("해당 월의 PMS 데이터가 부족하여 상관관계를 분석할 수 없습니다.")
-    else:
-        st.info("상관관계 분석을 위해 PMS 데이터를 먼저 업로드(또는 로드)해 주세요.")
-
+            st.info("상관관계 분석을 위해 PMS 데이터를 먼저 업로드(또는 로드)해 주세요.")
+            
 with tabs[7]:
     st.markdown("---")
     st.subheader("📊 전략 보고서 정식 출력")

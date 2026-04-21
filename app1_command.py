@@ -1849,41 +1849,95 @@ sensitivity = load_sensitivity()
 # 24. UI - 사이드바
 # ============================================================
 st.title("🏨 Amber Command Center")
+# ⭐ Firebase 연결 진단 패널 (동기화 문제 발생 시 먼저 확인)
+with st.expander("🔧 Firebase 연결 진단", expanded=False):
+    col_d1, col_d2 = st.columns(2)
+    with col_d1:
+        st.markdown("**호텔 DB ([firebase] → amber-rate)**")
+        if db_hotel:
+            st.success("✅ 연결 성공")
+            try:
+                sample_docs = list(db_hotel.collection("daily_snapshots").limit(3).stream())
+                st.caption(f"📦 daily_snapshots 샘플: {len(sample_docs)}개")
+                if sample_docs:
+                    first = sample_docs[0].to_dict()
+                    st.caption(f"📄 키: {', '.join(list(first.keys())[:5])}")
+                    st.caption(f"📅 work_date: {first.get('work_date', '없음')}")
+                else:
+                    st.warning("⚠️ daily_snapshots 비어있음!")
+                    st.caption("→ 요금 에디터에서 먼저 저장하세요")
+            except Exception as e:
+                st.error(f"❌ 조회 에러: {e}")
+        else:
+            st.error("❌ 연결 실패")
+    
+    with col_d2:
+        st.markdown("**항공 DB ([firebase_flight])**")
+        if db_flight:
+            st.success("✅ 연결 성공")
+        else:
+            st.warning("⚠️ 연결 실패")
 st.caption(f"v8.0 · 오늘 기준일: {TODAY.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[TODAY.weekday()]})")
 
 with st.sidebar:
     st.header("📅 과거 기록 조회")
-    try:
+    
+    # ⭐ 인덴테이션 버그 수정
+    saved_dates = []
+    if db_hotel:
+        try:
+            all_docs = list(db_hotel.collection("daily_snapshots").select(["work_date"]).stream())
+            saved_dates = sorted(list(set([
+                d.to_dict().get('work_date', '') 
+                for d in all_docs 
+                if d.to_dict().get('work_date')
+            ])))
+        except Exception as e:
+            st.caption(f"⚠️ 조회 실패: {str(e)[:80]}")
+    else:
+        st.error("❌ Firebase 연결 실패")
+    
+    if saved_dates:
+        st.markdown("**📌 저장된 날짜 (최근 14일)**")
+        tags = "".join([
+            f"<span style='background:#E8F5E9; border:1px solid #4CAF50; color:#2E7D32; padding:3px 8px; border-radius:12px; margin:2px; font-size:12px; display:inline-block;'>{d[5:]} ✅</span>"
+            for d in saved_dates[-14:]
+        ])
+        st.markdown(f"<div style='margin-bottom:10px;'>{tags}</div>", unsafe_allow_html=True)
+    else:
         if db_hotel:
-            all_docs = db_hotel.collection("daily_snapshots").select(["work_date"]).stream()
-        saved_dates = sorted(list(set([d.to_dict().get('work_date', '') for d in all_docs if d.to_dict().get('work_date')])))
-        if saved_dates:
-            st.markdown("**📌 저장된 날짜 (최근 14일)**")
-            tags = "".join([
-                f"<span style='background:#E8F5E9; border:1px solid #4CAF50; color:#2E7D32; padding:3px 8px; border-radius:12px; margin:2px; font-size:12px; display:inline-block;'>{d[5:]} ✅</span>"
-                for d in saved_dates[-14:]
-            ])
-            st.markdown(f"<div style='margin-bottom:10px;'>{tags}</div>", unsafe_allow_html=True)
-    except: pass
-
+            st.caption("저장된 기록이 아직 없습니다.")
+ 
     work_day = st.date_input("조회 날짜", value=date.today())
     if st.button("📂 과거 기록 불러오기"):
-        if db_hotel:  # ← 추가
-            docs = db_hotel.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
-            found = False
-            for doc in docs:
-                d_dict = doc.to_dict()
-                st.session_state.cmd_today_df = pd.DataFrame(d_dict['data'])
-                if not st.session_state.cmd_today_df.empty and 'Date' in st.session_state.cmd_today_df.columns:
-                    st.session_state.cmd_today_df['Date'] = pd.to_datetime(st.session_state.cmd_today_df['Date']).dt.date
-                if 'prev_data' in d_dict and d_dict['prev_data']:
-                    st.session_state.cmd_prev_df = pd.DataFrame(d_dict['prev_data'])
-                    if not st.session_state.cmd_prev_df.empty and 'Date' in st.session_state.cmd_prev_df.columns:
-                        st.session_state.cmd_prev_df['Date'] = pd.to_datetime(st.session_state.cmd_prev_df['Date']).dt.date
+        if db_hotel:
+            try:
+                docs = db_hotel.collection("daily_snapshots").where(
+                    "work_date", "==", work_day.strftime("%Y-%m-%d")
+                ).limit(1).stream()
+                found = False
+                for doc in docs:
+                    d_dict = doc.to_dict()
+                    st.session_state.cmd_today_df = pd.DataFrame(d_dict['data'])
+                    if not st.session_state.cmd_today_df.empty and 'Date' in st.session_state.cmd_today_df.columns:
+                        st.session_state.cmd_today_df['Date'] = pd.to_datetime(st.session_state.cmd_today_df['Date']).dt.date
+                    if 'prev_data' in d_dict and d_dict['prev_data']:
+                        st.session_state.cmd_prev_df = pd.DataFrame(d_dict['prev_data'])
+                        if not st.session_state.cmd_prev_df.empty and 'Date' in st.session_state.cmd_prev_df.columns:
+                            st.session_state.cmd_prev_df['Date'] = pd.to_datetime(st.session_state.cmd_prev_df['Date']).dt.date
+                    else:
+                        st.session_state.cmd_prev_df = pd.DataFrame()
+                    st.session_state.cmd_compare_label = f"불러온 과거 기록: {work_day}"
+                    found = True
+                if found:
+                    st.success(f"✅ {work_day} 로드 완료!")
+                    st.rerun()
                 else:
-                    st.session_state.cmd_prev_df = pd.DataFrame()
-                st.session_state.cmd_compare_label = f"불러온 과거 기록: {work_day}"
-                found = True
+                    st.warning(f"{work_day}에 저장된 기록 없음")
+            except Exception as e:
+                st.error(f"로드 실패: {e}")
+        else:
+            st.error("❌ DB 연결 안 됨")
 
     st.divider()
     st.header("🎯 시뮬레이터 기준값")
@@ -1916,19 +1970,23 @@ with st.sidebar:
     st.header("🔄 요금 에디터 연동")
     st.info("요금 에디터 사이트에서 업로드하고 확정한 최신 데이터를 불러옵니다. (파일 별도 업로드 불필요)")
     
-    if st.button("🚀 최신 데이터 동기화", type="primary", use_container_width=True):
+    if st.button("🚀 최신 데이터 동기화", type="primary", use_container_width=True, disabled=(not db_hotel)):
         with st.spinner("요금 에디터 데이터 불러오는 중..."):
-        
-            st.cache_data.clear() # ✨ 핵심: 동기화 누를 때 기존 캐시(메모리) 강제 삭제!
-          
+            st.cache_data.clear()
+            
             latest_db, save_dt = get_latest_snapshot(db_hotel)
-        
+            
             if not latest_db.empty:
                 st.session_state.cmd_today_df = latest_db.sort_values(by=['Date', 'RoomID'])
-            
-                # 어제 데이터(비교군) 가져오기 로직
-                if db_hotel:  # ← 🔴 변경 1: 안전장치 추가
-                    docs = db_hotel.collection("daily_snapshots").where("work_date", "<", date.today().strftime("%Y-%m-%d")).order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()  # ← 🔴 변경 2: db → db_hotel
+                
+                # 어제 데이터(비교군) 가져오기
+                try:
+                    docs = db_hotel.collection("daily_snapshots").where(
+                        "work_date", "<", date.today().strftime("%Y-%m-%d")
+                    ).order_by(
+                        "work_date", direction=firestore.Query.DESCENDING
+                    ).limit(1).stream()
+                    
                     prev_found = False
                     for doc in docs:
                         p_dict = doc.to_dict()
@@ -1937,16 +1995,23 @@ with st.sidebar:
                             p_df['Date'] = pd.to_datetime(p_df['Date']).dt.date
                             st.session_state.cmd_prev_df = p_df
                             prev_found = True
-                
+                    
                     if not prev_found:
                         st.session_state.cmd_prev_df = pd.DataFrame()
-                else:  # ← 🔴 변경 3: db_hotel이 None일 때 대비
+                except Exception as e:
+                    st.warning(f"어제 데이터 로드 실패: {e}")
                     st.session_state.cmd_prev_df = pd.DataFrame()
                 
                 st.session_state.cmd_compare_label = f"✅ 동기화 완료 (요금 에디터 기준: {save_dt})"
+                st.success(f"✅ {len(latest_db):,}개 행 동기화 완료!")
                 st.rerun()
             else:
-                st.warning("요금 에디터에 등록된 최신 데이터가 없습니다.")
+                st.warning("⚠️ 요금 에디터에 저장된 데이터가 없습니다.")
+                st.caption("""
+                **체크리스트:**
+                1. 요금 에디터에서 데이터 저장 버튼을 눌렀는지?
+                2. Firebase 콘솔 → amber-rate → Firestore → daily_snapshots 확인
+                3. 문서 안에 work_date, save_time, data 필드가 있는지?
 
 # ============================================================
 # 메인 영역

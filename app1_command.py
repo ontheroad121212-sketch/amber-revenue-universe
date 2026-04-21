@@ -2147,7 +2147,7 @@ if not st.session_state.cmd_today_df.empty:
             c2.metric("💸 업사이드 누수 (단가 홀딩)", f"₩ {int(holding_loss):,}", "시장 호황에도 단가를 안 올려 발생한 손실", delta_color="inverse")
             c3.metric("손실 발생 일수", f"{positive_opp['날짜'].nunique()}일", "타겟 기간 내 오판 횟수", delta_color="inverse")
 
-st.divider()
+            st.divider()
             
             # 날짜별 누수액 차트 데이터 집계
             daily_opp = positive_opp.groupby(['날짜', '요일', '손실유형'])['기회비용'].sum().reset_index()

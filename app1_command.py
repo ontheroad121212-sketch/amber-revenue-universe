@@ -25,28 +25,6 @@ from fpdf import FPDF
 import calendar
 
 # ============================================================
-# 2. 비밀번호
-# ============================================================
-def check_password():
-    if "cmd_authenticated" not in st.session_state:
-        st.session_state["cmd_authenticated"] = False
-    if not st.session_state["cmd_authenticated"]:
-        st.title("🔐 Amber Command Center")
-        st.caption("관계자 외 출입 금지")
-        pw = st.text_input("접속 암호", type="password")
-        if st.button("접속"):
-            if pw == "0822":
-                st.session_state["cmd_authenticated"] = True
-                st.rerun()
-            else:
-                st.error("암호가 틀렸습니다.")
-        return False
-    return True
-
-if not check_password():
-    st.stop()
-
-# ============================================================
 # 3. Firebase 초기화 (메모리 꼬임 강제 리셋 버전)
 # ============================================================
 import firebase_admin

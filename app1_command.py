@@ -132,7 +132,8 @@ FIXED_BAR0_TABLE = {"GDB": 298000, "GDF": 678000, "FFD": 704000, "FPT": 850000, 
 @st.cache_data(ttl=60)
 def load_applied_rates():
     try:
-        docs = db.collection("applied_rates").stream()
+        if not db_hotel: return {}
+        docs = db_hotel.collection("applied_rates").stream()
         result = {}
         for doc in docs:
             result[doc.id] = doc.to_dict()
@@ -238,7 +239,8 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
 @st.cache_data(ttl=60)
 def load_all_notes():
     try:
-        docs = db.collection("notes").stream()
+        if not db_hotel: return {}
+        docs = db_hotel.collection("notes").stream()
         notes = {}
         for doc in docs:
             d = doc.to_dict()
@@ -251,26 +253,28 @@ def load_all_notes():
         return notes
     except:
         return {}
-
+ 
 def save_note(key, content, tag="일반", completed=False):
     try:
+        if not db_hotel: return False
         if content.strip():
-            db.collection("notes").document(key).set({
+            db_hotel.collection("notes").document(key).set({
                 'content': content, 'tag': tag,
                 'updated_at': datetime.now().isoformat(),
                 'completed': completed,
             })
         else:
-            db.collection("notes").document(key).delete()
+            db_hotel.collection("notes").document(key).delete()
         st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"메모 저장 실패: {e}")
         return False
-
+ 
 def toggle_note_completed(key, completed):
     try:
-        doc_ref = db.collection("notes").document(key)
+        if not db_hotel: return False
+        doc_ref = db_hotel.collection("notes").document(key)
         doc = doc_ref.get()
         if doc.exists:
             data = doc.to_dict()
@@ -280,19 +284,15 @@ def toggle_note_completed(key, completed):
             return True
     except:
         return False
-
-def get_note_key(date_obj, room_id=None):
-    if room_id:
-        return f"{date_obj.strftime('%Y-%m-%d')}_{room_id}"
-    return f"{date_obj.strftime('%Y-%m-%d')}_ALL"
-
+ 
 # ============================================================
 # 8. 🗓️ 이벤트
 # ============================================================
 @st.cache_data(ttl=60)
 def load_events():
     try:
-        docs = db.collection("events").stream()
+        if not db_hotel: return []
+        docs = db_hotel.collection("events").stream()
         events = []
         for doc in docs:
             d = doc.to_dict()
@@ -304,10 +304,11 @@ def load_events():
         return events
     except:
         return []
-
+ 
 def save_event(event_id, name, start_d, end_d, impact, note):
     try:
-        db.collection("events").document(event_id).set({
+        if not db_hotel: return False
+        db_hotel.collection("events").document(event_id).set({
             'name': name, 'start_date': start_d.strftime('%Y-%m-%d'),
             'end_date': end_d.strftime('%Y-%m-%d'), 'impact': impact, 'note': note,
         })
@@ -316,28 +317,15 @@ def save_event(event_id, name, start_d, end_d, impact, note):
     except Exception as e:
         st.error(f"이벤트 저장 실패: {e}")
         return False
-
+ 
 def delete_event(event_id):
     try:
-        db.collection("events").document(event_id).delete()
+        if not db_hotel: return False
+        db_hotel.collection("events").document(event_id).delete()
         st.cache_data.clear()
         return True
     except:
         return False
-
-def get_event_boost_for_date(target_date, events):
-    total_boost = 0
-    active_events = []
-    for ev in events:
-        try:
-            start = datetime.strptime(ev['start_date'], '%Y-%m-%d').date()
-            end = datetime.strptime(ev['end_date'], '%Y-%m-%d').date()
-            if start <= target_date <= end:
-                total_boost += ev.get('impact', 1)
-                active_events.append(ev['name'])
-        except:
-            continue
-    return total_boost, active_events
 
 # ============================================================
 # 9. 🎯 민감도
@@ -345,16 +333,18 @@ def get_event_boost_for_date(target_date, events):
 @st.cache_data(ttl=300)
 def load_sensitivity():
     try:
-        doc = db.collection("settings").document("sensitivity").get()
+        if not db_hotel: return DEFAULT_SENSITIVITY.copy()
+        doc = db_hotel.collection("settings").document("sensitivity").get()
         if doc.exists:
             return doc.to_dict()
     except:
         pass
     return DEFAULT_SENSITIVITY.copy()
-
+ 
 def save_sensitivity(sens_dict):
     try:
-        db.collection("settings").document("sensitivity").set(sens_dict)
+        if not db_hotel: return False
+        db_hotel.collection("settings").document("sensitivity").set(sens_dict)
         st.cache_data.clear()
         return True
     except:
@@ -667,8 +657,9 @@ def generate_weekly_summary(opp_df, notes, events):
 def load_all_snapshots_history(days_back=400):
     """지난 N일간의 모든 스냅샷 (전년 비교용으로 400일)"""
     try:
+        if not db_hotel: return []
         cutoff = (date.today() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-        docs = db.collection("daily_snapshots").where("work_date", ">=", cutoff).stream()
+        docs = db_hotel.collection("daily_snapshots").where("work_date", ">=", cutoff).stream()
         all_records = []
         for doc in docs:
             d_dict = doc.to_dict()
@@ -1863,7 +1854,8 @@ st.caption(f"v8.0 · 오늘 기준일: {TODAY.strftime('%Y-%m-%d')} ({WEEKDAYS_K
 with st.sidebar:
     st.header("📅 과거 기록 조회")
     try:
-        all_docs = db.collection("daily_snapshots").select(["work_date"]).stream()
+        if db_hotel:
+            all_docs = db_hotel.collection("daily_snapshots").select(["work_date"]).stream()
         saved_dates = sorted(list(set([d.to_dict().get('work_date', '') for d in all_docs if d.to_dict().get('work_date')])))
         if saved_dates:
             st.markdown("**📌 저장된 날짜 (최근 14일)**")
@@ -1877,7 +1869,7 @@ with st.sidebar:
     work_day = st.date_input("조회 날짜", value=date.today())
     if st.button("📂 과거 기록 불러오기"):
         if db_hotel:  # ← 추가
-            docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
+            docs = db_hotel.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
             found = False
             for doc in docs:
                 d_dict = doc.to_dict()

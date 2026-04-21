@@ -2147,18 +2147,23 @@ if not st.session_state.cmd_today_df.empty:
             c2.metric("💸 업사이드 누수 (단가 홀딩)", f"₩ {int(holding_loss):,}", "시장 호황에도 단가를 안 올려 발생한 손실", delta_color="inverse")
             c3.metric("손실 발생 일수", f"{positive_opp['날짜'].nunique()}일", "타겟 기간 내 오판 횟수", delta_color="inverse")
 
-            st.divider()
+st.divider()
             
-            # 날짜별 누수액 차트
+            # 날짜별 누수액 차트 데이터 집계
             daily_opp = positive_opp.groupby(['날짜', '요일', '손실유형'])['기회비용'].sum().reset_index()
-            daily_opp['라벨'] = daily_opp.apply(lambda row: f"{row['날짜'].strftime('%m-%d')}({row['요일']})", axis=1)
             
+            # 💡 [해결] 데이터가 비어있지 않을 때만 라벨을 만들고 차트를 그리도록 안으로 넣었습니다!
             if not daily_opp.empty:
+                daily_opp['라벨'] = daily_opp.apply(lambda row: f"{row['날짜'].strftime('%m-%d')}({row['요일']})", axis=1)
+                
                 fig1 = px.bar(daily_opp, x='라벨', y='기회비용', color='손실유형',
                               color_discrete_map={'🩸 브랜드훼손(덤핑)': '#D32F2F', '💸 업사이드누수(홀딩)': '#FF9800'},
                               title="일자별 순수익 누수액 및 죄목 분류")
                 fig1.update_layout(template="plotly_white", height=400, xaxis_tickangle=-45)
                 st.plotly_chart(fig1, use_container_width=True)
+            else:
+                # 손실이 아예 없는 완벽한 상태일 때 띄워줄 메시지
+                st.success("✅ 기회비용(수익 누수)이 발생한 일자가 없습니다. 완벽한 가격 방어입니다!")
 
             st.subheader("🔥 최악의 오판 TOP 10 (Worst Decisions)")
             st.caption("경쟁사 상한선 필터 및 리드타임 페널티가 적용된 정밀 타격 리스트입니다.")

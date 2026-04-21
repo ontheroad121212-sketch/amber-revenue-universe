@@ -64,16 +64,18 @@ if "flight_app" not in existing_apps:
     except Exception as e:
         st.warning(f"항공 Firebase 연결 실패: {e}")
 
+# ===== 여기에 추가! =====
 try:
-    db = firestore.client(app=firebase_admin.get_app("hotel_app"))
+    db_hotel = firestore.client(app=firebase_admin.get_app("hotel_app"))
 except:
     st.error("호텔 DB 연결 실패")
-    st.stop()
+    db_hotel = None  # ← None으로라도 정의해야 함!
 
 try:
     db_flight = firestore.client(app=firebase_admin.get_app("flight_app"))
 except:
     db_flight = None
+
 
 # ============================================================
 # 4. 오늘 날짜 (한국 기준)
@@ -891,12 +893,15 @@ def robust_date_parser(d_val):
     except: pass
     return None
 
-def get_latest_snapshot():
-    # 호텔 DB에서 가져와야 함!
-    if not db_hotel:
+def get_latest_snapshot(db_connection):
+    """
+    파라미터:
+        db_connection: firestore.client 객체 (db_hotel을 넘겨받음)
+    """
+    if not db_connection:
         return pd.DataFrame(), None
     
-    docs = db_hotel.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
+    docs = db_connection.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
@@ -1871,21 +1876,22 @@ with st.sidebar:
 
     work_day = st.date_input("조회 날짜", value=date.today())
     if st.button("📂 과거 기록 불러오기"):
-        docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
-        found = False
-        for doc in docs:
-            d_dict = doc.to_dict()
-            st.session_state.cmd_today_df = pd.DataFrame(d_dict['data'])
-            if not st.session_state.cmd_today_df.empty and 'Date' in st.session_state.cmd_today_df.columns:
-                st.session_state.cmd_today_df['Date'] = pd.to_datetime(st.session_state.cmd_today_df['Date']).dt.date
-            if 'prev_data' in d_dict and d_dict['prev_data']:
-                st.session_state.cmd_prev_df = pd.DataFrame(d_dict['prev_data'])
-                if not st.session_state.cmd_prev_df.empty and 'Date' in st.session_state.cmd_prev_df.columns:
-                    st.session_state.cmd_prev_df['Date'] = pd.to_datetime(st.session_state.cmd_prev_df['Date']).dt.date
-            else:
-                st.session_state.cmd_prev_df = pd.DataFrame()
-            st.session_state.cmd_compare_label = f"불러온 과거 기록: {work_day}"
-            found = True
+        if db_hotel:  # ← 추가
+            docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
+            found = False
+            for doc in docs:
+                d_dict = doc.to_dict()
+                st.session_state.cmd_today_df = pd.DataFrame(d_dict['data'])
+                if not st.session_state.cmd_today_df.empty and 'Date' in st.session_state.cmd_today_df.columns:
+                    st.session_state.cmd_today_df['Date'] = pd.to_datetime(st.session_state.cmd_today_df['Date']).dt.date
+                if 'prev_data' in d_dict and d_dict['prev_data']:
+                    st.session_state.cmd_prev_df = pd.DataFrame(d_dict['prev_data'])
+                    if not st.session_state.cmd_prev_df.empty and 'Date' in st.session_state.cmd_prev_df.columns:
+                        st.session_state.cmd_prev_df['Date'] = pd.to_datetime(st.session_state.cmd_prev_df['Date']).dt.date
+                else:
+                    st.session_state.cmd_prev_df = pd.DataFrame()
+                st.session_state.cmd_compare_label = f"불러온 과거 기록: {work_day}"
+                found = True
 
     st.divider()
     st.header("🎯 시뮬레이터 기준값")
@@ -1923,7 +1929,7 @@ with st.sidebar:
         
             st.cache_data.clear() # ✨ 핵심: 동기화 누를 때 기존 캐시(메모리) 강제 삭제!
           
-            latest_db, save_dt = get_latest_snapshot()
+            latest_db, save_dt = get_latest_snapshot(db_hotel)
         
             if not latest_db.empty:
                 st.session_state.cmd_today_df = latest_db.sort_values(by=['Date', 'RoomID'])

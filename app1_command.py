@@ -24,32 +24,25 @@ import plotly.graph_objects as go
 from fpdf import FPDF
 import calendar
 
-# ============================================================
-# 1. 페이지 설정
-# ============================================================
-st.set_page_config(page_title="Amber Command Center", page_icon="🏨", layout="wide")
 
 # ============================================================
 # 2. 비밀번호
 # ============================================================
 def check_password():
-    if "authenticated" not in st.session_state:
-        st.session_state["authenticated"] = False
-    if not st.session_state["authenticated"]:
+    if "cmd_authenticated" not in st.session_state:
+        st.session_state["cmd_authenticated"] = False
+    if not st.session_state["cmd_authenticated"]:
         st.title("🔐 Amber Command Center")
         st.caption("관계자 외 출입 금지")
         pw = st.text_input("접속 암호", type="password")
         if st.button("접속"):
             if pw == "0822":
-                st.session_state["authenticated"] = True
+                st.session_state["cmd_authenticated"] = True
                 st.rerun()
             else:
                 st.error("암호가 틀렸습니다.")
         return False
     return True
-
-if not check_password():
-    st.stop()
 
 # ============================================================
 # 3. Firebase 초기화
@@ -1844,10 +1837,10 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
 # ============================================================
 # 23. 세션 초기화
 # ============================================================
-if 'today_df' not in st.session_state: st.session_state.today_df = pd.DataFrame()
-if 'prev_df' not in st.session_state: st.session_state.prev_df = pd.DataFrame()
-if 'compare_label' not in st.session_state: st.session_state.compare_label = ""
-
+if 'cmd_today_df' not in st.session_state: st.session_state.cmd_today_df = pd.DataFrame()
+if 'cmd_prev_df' not in st.session_state: st.session_state.cmd_prev_df = pd.DataFrame()
+if 'cmd_compare_label' not in st.session_state: st.session_state.cmd_compare_label = ""
+    
 df_flight_all, df_comp_all = load_market_data()
 all_notes = load_all_notes()
 all_events = load_events()
@@ -1879,19 +1872,17 @@ with st.sidebar:
         found = False
         for doc in docs:
             d_dict = doc.to_dict()
-            st.session_state.today_df = pd.DataFrame(d_dict['data'])
-            if not st.session_state.today_df.empty and 'Date' in st.session_state.today_df.columns:
-                st.session_state.today_df['Date'] = pd.to_datetime(st.session_state.today_df['Date']).dt.date
+            st.session_state.cmd_today_df = pd.DataFrame(d_dict['data'])
+            if not st.session_state.cmd_today_df.empty and 'Date' in st.session_state.cmd_today_df.columns:
+                st.session_state.cmd_today_df['Date'] = pd.to_datetime(st.session_state.cmd_today_df['Date']).dt.date
             if 'prev_data' in d_dict and d_dict['prev_data']:
-                st.session_state.prev_df = pd.DataFrame(d_dict['prev_data'])
-                if not st.session_state.prev_df.empty and 'Date' in st.session_state.prev_df.columns:
-                    st.session_state.prev_df['Date'] = pd.to_datetime(st.session_state.prev_df['Date']).dt.date
+                st.session_state.cmd_prev_df = pd.DataFrame(d_dict['prev_data'])
+                if not st.session_state.cmd_prev_df.empty and 'Date' in st.session_state.cmd_prev_df.columns:
+                    st.session_state.cmd_prev_df['Date'] = pd.to_datetime(st.session_state.cmd_prev_df['Date']).dt.date
             else:
-                st.session_state.prev_df = pd.DataFrame()
-            st.session_state.compare_label = f"불러온 과거 기록: {work_day}"
+                st.session_state.cmd_prev_df = pd.DataFrame()
+            st.session_state.cmd_compare_label = f"불러온 과거 기록: {work_day}"
             found = True
-        if found: st.success("스냅샷 로드 완료")
-        else: st.warning("데이터 없음")
 
     st.divider()
     st.header("🎯 시뮬레이터 기준값")
@@ -1932,7 +1923,7 @@ with st.sidebar:
             latest_db, save_dt = get_latest_snapshot()
             
             if not latest_db.empty:
-                st.session_state.today_df = latest_db.sort_values(by=['Date', 'RoomID'])
+                st.session_state.cmd_today_df = latest_db.sort_values(by=['Date', 'RoomID'])
                 
                 # 어제 데이터(비교군) 가져오기 로직
                 docs = db.collection("daily_snapshots").where("work_date", "<", date.today().strftime("%Y-%m-%d")).order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()
@@ -1942,13 +1933,13 @@ with st.sidebar:
                     p_df = pd.DataFrame(p_dict.get('data', []))
                     if not p_df.empty and 'Date' in p_df.columns:
                         p_df['Date'] = pd.to_datetime(p_df['Date']).dt.date
-                        st.session_state.prev_df = p_df
+                        st.session_state.cmd_prev_df = p_df
                         prev_found = True
                 
                 if not prev_found:
-                    st.session_state.prev_df = pd.DataFrame()
+                    st.session_state.cmd_prev_df = pd.DataFrame()
                     
-                st.session_state.compare_label = f"✅ 동기화 완료 (요금 에디터 기준: {save_dt})"
+                st.session_state.cmd_compare_label = f"✅ 동기화 완료 (요금 에디터 기준: {save_dt})"
                 st.rerun()
             else:
                 st.warning("요금 에디터에 등록된 최신 데이터가 없습니다.")
@@ -1956,9 +1947,9 @@ with st.sidebar:
 # ============================================================
 # 메인 영역
 # ============================================================
-if not st.session_state.today_df.empty:
-    curr = st.session_state.today_df
-    prev = st.session_state.prev_df
+if not st.session_state.cmd_today_df.empty:
+    curr = st.session_state.cmd_today_df
+    prev = st.session_state.cmd_prev_df
 
     alert_opp_df = calculate_opportunity_cost(
         curr, df_flight_all, df_comp_all,
@@ -2046,8 +2037,8 @@ if not st.session_state.today_df.empty:
         st.markdown("")
 
     # 📜 과거 기록 (접힌 상태)
-    if fixed_alerts_past:
-        with st.expander(f"📜 지난 기록 ({len(fixed_alerts_past)}건) - 이미 마감된 고점유율 날짜"):
+    if st.session_state.cmd_compare_label:
+        st.info(f"ℹ️ {st.session_state.cmd_compare_label}")
             st.caption("이미 지나간 날짜들 - 당시 수기 인상 대상이었던 날들의 기록")
             for a in fixed_alerts_past[-10:]:
                 level_color = "#C62828" if a['level'] == 'critical' else "#FF6F00"

@@ -1215,7 +1215,7 @@ with tabs[1]:
     else:
         st.info("PMS 데이터를 업로드해 주세요.")
         
-with tabs[2]:
+    with tabs[2]:
         st.subheader(f"⚖️ {selected_month}월 수요(RN) vs 단가(ADR) 전략 매트릭스")
         st.info("💡 **[Price vs Demand]** 객실 판매량(RN)을 채우기 위해 단가(ADR)를 얼마나 훼손하고 있는지 확인하는 실시간 이중축 차트입니다.")
         

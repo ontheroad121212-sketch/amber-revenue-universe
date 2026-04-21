@@ -15,12 +15,6 @@ from supabase import create_client, Client
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# 1. 페이지 설정 (최상단 고정 필수)
-st.set_page_config(
-    page_title="Amber Oracle | Strategic War Room",
-    page_icon="🏛️",
-    layout="wide"
-)
 
 # --- 🌟 Firebase 초기화 로직 (Streamlit Secrets 활용) ---
 if not firebase_admin._apps:
@@ -428,12 +422,12 @@ def get_booking_curve(total_goal, lead_days, demand_idx):
 # ==========================================
 # 🌟 세션 및 초기 변수 세팅
 # ==========================================
-if 'loaded_snap' not in st.session_state:
-    st.session_state['loaded_snap'] = None
+if 'oracle_loaded_snap' not in st.session_state:
+    st.session_state['oracle_loaded_snap'] = None
 
 # 💡 [핵심 패치] 파일 업로더 메모리 강제 초기화를 위한 고유 키
-if 'file_key' not in st.session_state:
-    st.session_state['file_key'] = 0
+if 'oracle_file_key' not in st.session_state:
+    st.session_state['oracle_file_key'] = 0
 
 yearly_data_store = {m: {"rev": 0.0, "occ": 0.0, "rn": 0.0, "adr": 0.0} for m in range(1, 13)}
 df_full_pms = pd.DataFrame()
@@ -454,21 +448,21 @@ st.sidebar.markdown("---")
 st.sidebar.subheader("📂 전략 데이터 업로드 센터")
 
 # 💡 [핵심 패치] key 속성에 file_key를 부여하여, 언제든 메모리를 폭파시킬 수 있게 만듦
-pms_files = st.sidebar.file_uploader("PMS 상세 리스트 (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"pms_{st.session_state['file_key']}")
-sob_files = st.sidebar.file_uploader("영업 현황 SOB (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"sob_{st.session_state['file_key']}")
-avail_files = st.sidebar.file_uploader("사용 가능 객실 현황 (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"avail_{st.session_state['file_key']}")
+pms_files = st.sidebar.file_uploader("PMS 상세 리스트 (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"pms_{st.session_state['oracle_file_key']}")
+sob_files = st.sidebar.file_uploader("영업 현황 SOB (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"sob_{st.session_state['oracle_file_key']}")
+avail_files = st.sidebar.file_uploader("사용 가능 객실 현황 (다중)", type=['csv', 'xlsx', 'xls'], accept_multiple_files=True, key=f"avail_{st.session_state['oracle_file_key']}")
 
 # ==========================================
 # 데이터 파싱 (업로드 vs 클라우드 스냅샷 우선순위 병합)
 # ==========================================
-if st.session_state['loaded_snap'] is not None:
+if st.session_state['oracle_loaded_snap'] is not None:
     st.sidebar.success("☁️ 클라우드 타임머신 모드 작동 중! (새 파일을 올리면 최신 데이터로 덮어씁니다)")
-    df_full_pms = st.session_state['loaded_snap']['pms'].copy() if not st.session_state['loaded_snap']['pms'].empty else pd.DataFrame()
-    cloud_sob = st.session_state['loaded_snap']['sob']
+    df_full_pms = st.session_state['oracle_loaded_snap']['pms'].copy() if not st.session_state['oracle_loaded_snap']['pms'].empty else pd.DataFrame()
+    cloud_sob = st.session_state['oracle_loaded_snap']['sob']
     for k, v in cloud_sob.items():
         if str(k).isdigit():
             yearly_data_store[int(k)] = v
-    avail_analysis = st.session_state['loaded_snap']['avail']
+    avail_analysis = st.session_state['oracle_loaded_snap']['avail']
 
 # 1. SOB 데이터 처리 (스냅샷이 있든 없든 새 파일이 우선)
 if sob_files:
@@ -723,7 +717,7 @@ with st.sidebar.expander("📥 과거 백업 관리 및 시스템 초기화", ex
         with c1:
             if st.button("🔄 백업 불러오기", use_container_width=True):
                 pms_c, sob_c, avail_c = load_snapshot_data(sel_snap_id)
-                st.session_state['loaded_snap'] = {'pms': pms_c, 'sob': sob_c, 'avail': avail_c}
+                st.session_state['oracle_loaded_snap'] = {'pms': pms_c, 'sob': sob_c, 'avail': avail_c}
                 st.rerun()
         with c2:
             # 1. 특정한 날짜(백업)만 DB에서 완전히 삭제하는 기능
@@ -740,8 +734,8 @@ with st.sidebar.expander("📥 과거 백업 관리 및 시스템 초기화", ex
     st.markdown("---")
     # 2. 업로드된 파일과 화면을 싹 다 날려버리는 무적의 초기화 버튼
     if st.button("🧨 시스템 완전 초기화 (모든 데이터 리셋)", use_container_width=True):
-        st.session_state['loaded_snap'] = None
-        st.session_state['file_key'] += 1  # 💡 파일 업로더의 키를 변경하여 기존 캐시를 완전히 날림
+        st.session_state['oracle_loaded_snap'] = None
+        st.session_state['oracle_file_key'] += 1  # 💡 파일 업로더의 키를 변경하여 기존 캐시를 완전히 날림
         st.rerun()
 
 

@@ -765,7 +765,7 @@ if avail_files:
     except Exception as e: st.sidebar.error(f"재고 분석 에러: {e}")
 
 # ======================================================================
-# 🚀 [아키텍트 엔진 v6.9] PMS 증분 병합
+# 🚀 [아키텍트 엔진 v6.9] PMS 증분 병합 (채널/거래처 데이터 보존)
 # ======================================================================
 if pms_files:
     try:
@@ -797,6 +797,8 @@ if pms_files:
             c_tp = find_column(new_v_df, ['객실타입', 'RoomType'])
             c_id = find_column(new_v_df, ['예약번호', 'ConfNo', 'No', '예약번호 '])
             c_bk = find_column(new_v_df, ['예약일자', '예약일'])
+            # 💡 [추가] Q열에 있는 '거래처' 컬럼을 찾아서 변수에 저장합니다!
+            c_ch = find_column(new_v_df, ['거래처', '예약처', 'Channel', '예약경로'])
 
             new_v_df['Temp_In'] = pd.to_datetime(new_v_df[c_in], errors='coerce')
             new_v_df['Val_Nights'] = pd.to_numeric(new_v_df[c_rn].astype(str).str.extract(r'(\d+)')[0], errors='coerce').fillna(1).astype(int)
@@ -812,6 +814,8 @@ if pms_files:
             def expand_v69(row):
                 unit_daily_rev = row['Rate_Per_Night'] / row['Val_Rooms'] if row['Val_Rooms'] > 0 else 0
                 res_id = str(row[c_id]).strip() if c_id and pd.notna(row[c_id]) else f"{row[c_tp]}_{row['Rate_Per_Night']}"
+                # 💡 [추가] 거래처 데이터가 있으면 빼내고, 없으면 '기타'로 둡니다.
+                ch_name = str(row[c_ch]).strip() if c_ch and pd.notna(row[c_ch]) else "기타 (Unknown)"
                 
                 rows = []
                 for n in range(row['Val_Nights']):
@@ -824,6 +828,7 @@ if pms_files:
                             '객실타입': row[c_tp],
                             'Temp_In': row['Temp_In'],
                             'Temp_Bk': row['Temp_Bk'],
+                            'Channel': ch_name,  # 💡 [추가] 분해된 데이터 표에 거래처 이름도 같이 담아줍니다!
                             'Unique_Key': f"{res_id}_{current_date.strftime('%Y%m%d')}_R{r}"
                         })
                 return rows

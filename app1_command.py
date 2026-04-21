@@ -24,7 +24,6 @@ import plotly.graph_objects as go
 from fpdf import FPDF
 import calendar
 
-
 # ============================================================
 # 2. 비밀번호
 # ============================================================
@@ -44,6 +43,9 @@ def check_password():
         return False
     return True
 
+if not check_password():
+    st.stop()
+
 # ============================================================
 # 3. Firebase 초기화
 # ============================================================
@@ -51,7 +53,7 @@ existing_apps = [a.name for a in firebase_admin._apps.values()] if firebase_admi
 
 if "hotel_app" not in existing_apps:
     try:
-        cred_h = credentials.Certificate(dict(st.secrets["firebase"]))
+        cred_h = credentials.Certificate(dict(st.secrets["firebase_hotel"]))
         firebase_admin.initialize_app(cred_h, name="hotel_app")
     except Exception as e:
         st.error(f"호텔 Firebase 연결 실패: {e}")
@@ -64,18 +66,16 @@ if "flight_app" not in existing_apps:
     except Exception as e:
         st.warning(f"항공 Firebase 연결 실패: {e}")
 
-# ===== 여기에 추가! =====
 try:
-    db_hotel = firestore.client(app=firebase_admin.get_app("hotel_app"))
+    db = firestore.client(app=firebase_admin.get_app("hotel_app"))
 except:
     st.error("호텔 DB 연결 실패")
-    db_hotel = None  # ← None으로라도 정의해야 함!
+    st.stop()
 
 try:
     db_flight = firestore.client(app=firebase_admin.get_app("flight_app"))
 except:
     db_flight = None
-
 
 # ============================================================
 # 4. 오늘 날짜 (한국 기준)
@@ -132,8 +132,7 @@ FIXED_BAR0_TABLE = {"GDB": 298000, "GDF": 678000, "FFD": 704000, "FPT": 850000, 
 @st.cache_data(ttl=60)
 def load_applied_rates():
     try:
-        if not db_hotel: return {}
-        docs = db_hotel.collection("applied_rates").stream()
+        docs = db.collection("applied_rates").stream()
         result = {}
         for doc in docs:
             result[doc.id] = doc.to_dict()
@@ -211,7 +210,6 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
         current_avail = 0.0
     occ = ((total - current_avail) / total * 100) if total > 0 else 0
 
-    # [핵심 수정] 다른 사이트에서 덮어씌운 '수동 확정 요금'이 있는지 체크해서 무조건 1순위로 적용
     if not manual_bar:
         applied_rates = load_applied_rates()
         date_str = date_obj.strftime('%Y-%m-%d')
@@ -239,8 +237,7 @@ def get_final_values(room_id, date_obj, avail, total, manual_bar=None):
 @st.cache_data(ttl=60)
 def load_all_notes():
     try:
-        if not db_hotel: return {}
-        docs = db_hotel.collection("notes").stream()
+        docs = db.collection("notes").stream()
         notes = {}
         for doc in docs:
             d = doc.to_dict()
@@ -253,28 +250,26 @@ def load_all_notes():
         return notes
     except:
         return {}
- 
+
 def save_note(key, content, tag="일반", completed=False):
     try:
-        if not db_hotel: return False
         if content.strip():
-            db_hotel.collection("notes").document(key).set({
+            db.collection("notes").document(key).set({
                 'content': content, 'tag': tag,
                 'updated_at': datetime.now().isoformat(),
                 'completed': completed,
             })
         else:
-            db_hotel.collection("notes").document(key).delete()
+            db.collection("notes").document(key).delete()
         st.cache_data.clear()
         return True
     except Exception as e:
         st.error(f"메모 저장 실패: {e}")
         return False
- 
+
 def toggle_note_completed(key, completed):
     try:
-        if not db_hotel: return False
-        doc_ref = db_hotel.collection("notes").document(key)
+        doc_ref = db.collection("notes").document(key)
         doc = doc_ref.get()
         if doc.exists:
             data = doc.to_dict()
@@ -284,15 +279,19 @@ def toggle_note_completed(key, completed):
             return True
     except:
         return False
- 
+
+def get_note_key(date_obj, room_id=None):
+    if room_id:
+        return f"{date_obj.strftime('%Y-%m-%d')}_{room_id}"
+    return f"{date_obj.strftime('%Y-%m-%d')}_ALL"
+
 # ============================================================
 # 8. 🗓️ 이벤트
 # ============================================================
 @st.cache_data(ttl=60)
 def load_events():
     try:
-        if not db_hotel: return []
-        docs = db_hotel.collection("events").stream()
+        docs = db.collection("events").stream()
         events = []
         for doc in docs:
             d = doc.to_dict()
@@ -304,11 +303,10 @@ def load_events():
         return events
     except:
         return []
- 
+
 def save_event(event_id, name, start_d, end_d, impact, note):
     try:
-        if not db_hotel: return False
-        db_hotel.collection("events").document(event_id).set({
+        db.collection("events").document(event_id).set({
             'name': name, 'start_date': start_d.strftime('%Y-%m-%d'),
             'end_date': end_d.strftime('%Y-%m-%d'), 'impact': impact, 'note': note,
         })
@@ -317,15 +315,28 @@ def save_event(event_id, name, start_d, end_d, impact, note):
     except Exception as e:
         st.error(f"이벤트 저장 실패: {e}")
         return False
- 
+
 def delete_event(event_id):
     try:
-        if not db_hotel: return False
-        db_hotel.collection("events").document(event_id).delete()
+        db.collection("events").document(event_id).delete()
         st.cache_data.clear()
         return True
     except:
         return False
+
+def get_event_boost_for_date(target_date, events):
+    total_boost = 0
+    active_events = []
+    for ev in events:
+        try:
+            start = datetime.strptime(ev['start_date'], '%Y-%m-%d').date()
+            end = datetime.strptime(ev['end_date'], '%Y-%m-%d').date()
+            if start <= target_date <= end:
+                total_boost += ev.get('impact', 1)
+                active_events.append(ev['name'])
+        except:
+            continue
+    return total_boost, active_events
 
 # ============================================================
 # 9. 🎯 민감도
@@ -333,18 +344,16 @@ def delete_event(event_id):
 @st.cache_data(ttl=300)
 def load_sensitivity():
     try:
-        if not db_hotel: return DEFAULT_SENSITIVITY.copy()
-        doc = db_hotel.collection("settings").document("sensitivity").get()
+        doc = db.collection("settings").document("sensitivity").get()
         if doc.exists:
             return doc.to_dict()
     except:
         pass
     return DEFAULT_SENSITIVITY.copy()
- 
+
 def save_sensitivity(sens_dict):
     try:
-        if not db_hotel: return False
-        db_hotel.collection("settings").document("sensitivity").set(sens_dict)
+        db.collection("settings").document("sensitivity").set(sens_dict)
         st.cache_data.clear()
         return True
     except:
@@ -407,7 +416,7 @@ def get_sim_bar(room_id, date_obj, avail, total,
 # ============================================================
 # 11. 🚨 Fixed 수기 인상 알림 (과거/미래 분리)
 # ============================================================
-@st.cache_data(ttl=600, show_spinner=False) # ✨ 이 한 줄만 추가하세요!
+@st.cache_data(ttl=600, show_spinner=False)
 def get_fixed_room_alerts(current_df, events=None):
     if current_df.empty:
         return [], []
@@ -514,9 +523,9 @@ def get_market_price_for_date(target_date, df_flight, df_comp, search_date_str=N
     return josun_price, parnas_price, flight_price
 
 # ============================================================
-# 13. 기회비용 계산 (is_past 필드 추가)
+# 13. 기회비용 계산
 # ============================================================
-@st.cache_data(ttl=600, show_spinner=False) # ✨ 이 한 줄만 추가하세요!
+@st.cache_data(ttl=600, show_spinner=False)
 def calculate_opportunity_cost(current_df, df_flight, df_comp,
                                 josun_threshold, flight_threshold,
                                 search_date_str=None, events=None, sensitivity=None):
@@ -573,7 +582,7 @@ def get_our_avg_price_for_dates(current_df, target_dates):
     return result
 
 # ============================================================
-# 14. 🚨 오늘 알림 (미래만)
+# 14. 오늘 알림
 # ============================================================
 def generate_today_alerts(opp_df, notes, events, top_n=5, only_future=True):
     if opp_df.empty:
@@ -609,10 +618,9 @@ def generate_today_alerts(opp_df, notes, events, top_n=5, only_future=True):
     return alerts
 
 # ============================================================
-# 15. 📅 주간 요약 생성
+# 15. 주간 요약
 # ============================================================
 def generate_weekly_summary(opp_df, notes, events):
-    """지난 주 / 이번 주 / 다음 주 요약"""
     today_weekday = TODAY.weekday()
     this_monday = TODAY - timedelta(days=today_weekday)
     last_monday = this_monday - timedelta(days=7)
@@ -636,8 +644,6 @@ def generate_weekly_summary(opp_df, notes, events):
             period['total_opp'] = week_df[week_df['기회비용'] > 0]['기회비용'].sum()
             period['trigger_count'] = (week_df['BAR상승'] > 0).sum()
             period['affected_days'] = week_df[week_df['기회비용'] > 0]['날짜'].nunique()
-
-            # TOP 3 누수일
             top_days = week_df[week_df['기회비용'] > 0].groupby(['날짜', '요일']).agg({
                 '기회비용': 'sum', '시그널': lambda x: x.iloc[0]
             }).reset_index().sort_values('기회비용', ascending=False).head(3)
@@ -651,15 +657,13 @@ def generate_weekly_summary(opp_df, notes, events):
     return summary
 
 # ============================================================
-# 16. 📊 전년 동기 비교 & 누적 추적
+# 16. 전년 동기 비교 & 누적 추적
 # ============================================================
 @st.cache_data(ttl=600)
 def load_all_snapshots_history(days_back=400):
-    """지난 N일간의 모든 스냅샷 (전년 비교용으로 400일)"""
     try:
-        if not db_hotel: return []
         cutoff = (date.today() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-        docs = db_hotel.collection("daily_snapshots").where("work_date", ">=", cutoff).stream()
+        docs = db.collection("daily_snapshots").where("work_date", ">=", cutoff).stream()
         all_records = []
         for doc in docs:
             d_dict = doc.to_dict()
@@ -675,8 +679,8 @@ def load_all_snapshots_history(days_back=400):
         return []
 
 def calculate_cumulative_metrics(snapshots_list, df_flight, df_comp,
-                                  josun_threshold, flight_threshold,
-                                  events, sensitivity, search_date_str=None):
+                                 josun_threshold, flight_threshold,
+                                 events, sensitivity, search_date_str=None):
     if not snapshots_list:
         return pd.DataFrame()
     snapshot_df = pd.DataFrame(snapshots_list)
@@ -710,7 +714,6 @@ def calculate_cumulative_metrics(snapshots_list, df_flight, df_comp,
     return pd.DataFrame(results)
 
 def get_year_over_year_comparison(current_df, snapshots_list):
-    """전년 동기 비교"""
     if current_df.empty:
         return pd.DataFrame()
 
@@ -725,7 +728,6 @@ def get_year_over_year_comparison(current_df, snapshots_list):
         except:
             continue
 
-        # 현재 평균 가격
         curr_day_data = current_df[current_df['Date'] == d]
         curr_prices = []
         for rid in DYNAMIC_ROOMS:
@@ -739,7 +741,6 @@ def get_year_over_year_comparison(current_df, snapshots_list):
 
         curr_avg = sum(curr_prices) / len(curr_prices) if curr_prices else 0
 
-        # 작년 같은 날
         last_year_prices = []
         if snapshots_list:
             for snap in snapshots_list:
@@ -884,15 +885,8 @@ def robust_date_parser(d_val):
     except: pass
     return None
 
-def get_latest_snapshot(db_connection):
-    """
-    파라미터:
-        db_connection: firestore.client 객체 (db_hotel을 넘겨받음)
-    """
-    if not db_connection:
-        return pd.DataFrame(), None
-    
-    docs = db_connection.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
+def get_latest_snapshot():
+    docs = db.collection("daily_snapshots").order_by("save_time", direction=firestore.Query.DESCENDING).limit(1).stream()
     for doc in docs:
         d_dict = doc.to_dict()
         df = pd.DataFrame(d_dict['data'])
@@ -900,8 +894,9 @@ def get_latest_snapshot(db_connection):
             df['Date'] = pd.to_datetime(df['Date']).dt.date
         return df, d_dict.get('work_date', '알수없음')
     return pd.DataFrame(), None
+
 # ============================================================
-# 18-A. UI 필터용 헬퍼 함수 (신규 추가)
+# 18-A. UI 필터용 헬퍼 함수
 # ============================================================
 def date_filter_toggle(key_prefix, total_dates, default_show_past=False):
     past_count = sum(1 for d in total_dates if d < TODAY)
@@ -933,7 +928,6 @@ def render_note_input(key_id, label="메모", notes=None, show_tag=True, widget_
     existing = notes.get(key_id, {})
     existing_content = existing.get('content', '')
     existing_tag = existing.get('tag', '일반')
-    # widget_prefix를 붙여서 탭마다 key가 중복되지 않게
     unique_key = f"{widget_prefix}_{key_id}" if widget_prefix else key_id
     col1, col2 = st.columns([4, 1]) if show_tag else (st.container(), None)
     with col1:
@@ -953,7 +947,7 @@ def render_note_input(key_id, label="메모", notes=None, show_tag=True, widget_
             st.rerun()
 
 # ============================================================
-# 20. 기본 테이블 렌더러 (통합 관제 모드 추가)
+# 20. 기본 테이블 렌더러
 # ============================================================
 def get_bar_price(room_id, bar):
     if bar == "BAR0":
@@ -968,7 +962,6 @@ def render_master_table(current_df, prev_df, title="", mode="기준", applied_ra
     dates = sorted(current_df['Date'].unique())
     row_padding = "8px"; header_padding = "5px"; font_size = "11px"
     
-    # 타이틀 테마 색상
     if mode == "통합관제":
         bg_title = "#FFF8E1"; border_title = "#FF8F00"
     else:
@@ -1011,11 +1004,9 @@ def render_master_table(current_df, prev_df, title="", mode="기준", applied_ra
             avail = curr_match.iloc[0]['Available']; total = curr_match.iloc[0]['Total']
             occ = ((total - avail) / total * 100) if total > 0 else 0
             
-            # [핵심] 통합관제를 위해 순수 시스템 권장가를 따로 도출
             type_code, season, is_weekend = get_season_details(d)
             pure_sys_bar = determine_bar(season, is_weekend, occ) if rid in DYNAMIC_ROOMS else type_code
             
-            # get_final_values 호출 (여기에 이미 오버라이드 값이 섞여 나옴)
             _, bar, base_price, _ = get_final_values(rid, d, avail, total)
             
             prev_bar, prev_avail = None, None
@@ -1038,8 +1029,6 @@ def render_master_table(current_df, prev_df, title="", mode="기준", applied_ra
             elif mode == "통합관제":
                 applied_bar = applied_rates.get(date_str, {}).get('rooms', {}).get(rid) if applied_rates else None
                 is_applied = applied_bar is not None
-                
-                # 수동 개입이 없다면, 현재 CMS 요금은 어제 요금(prev_bar)에 머물러 있다고 전제함
                 current_cms_bar = prev_bar if prev_bar else pure_sys_bar
                 
                 if is_past:
@@ -1055,30 +1044,25 @@ def render_master_table(current_df, prev_df, title="", mode="기준", applied_ra
                         bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
                         
                         if applied_bar == pure_sys_bar:
-                            # 1. 수동으로 확정했는데, 시스템 권장가랑 똑같음
                             style += f"background-color: {bg}; border: 2.5px solid #2E7D32;"
                             content = f"<div style='font-size:9px; color:#2E7D32; font-weight:bold; margin-bottom:2px;'>✅ 전략 일치</div>"
                             content += f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
                         else:
-                            # 2. 수동으로 시스템 권장가와 다르게 덮어씌움 (비싸게든 싸게든)
                             style += f"background-color: {bg}; border: 2.5px dashed #D32F2F;"
                             content = f"<div style='font-size:9px; color:#D32F2F; font-weight:bold; margin-bottom:2px;'>⭐ 수동 개입</div>"
                             content += f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%<br>"
                             content += f"<div style='font-size:10px; color:#333; margin-top:3px; background:rgba(255,255,255,0.7); padding:2px; border-radius:3px;'>💡권장: <del>{pure_sys_bar}</del></div>"
                     else:
-                        # 수동 개입 안 한 경우 (어제 요금 그대로 유지 중)
                         final_bar = current_cms_bar
                         final_price = get_bar_price(rid, final_bar)
                         bg = BAR_GRADIENT_COLORS.get(final_bar, "#FFFFFF") if rid in DYNAMIC_ROOMS or final_bar == "BAR0" else "#F1F1F1"
                         
                         if pure_sys_bar != current_cms_bar:
-                            # 3. ⚠️ 핵심 추가: 시스템은 바꾸라고 했는데 안 바꾼 날 (의도적 홀딩 or 누수)
                             style += f"background-color: {bg}; border: 2.5px solid #FF8F00;"
                             content = f"<div style='font-size:9px; color:#FF8F00; font-weight:bold; margin-bottom:2px;'>⚠️ 미적용 (수익포기)</div>"
                             content += f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%<br>"
                             content += f"<div style='font-size:10px; color:#333; margin-top:3px; background:rgba(255,255,255,0.9); padding:2px; border-radius:3px;'>💡권장: <b style='color:#D32F2F;'>{pure_sys_bar}</b></div>"
                         else:
-                            # 4. 시스템도 어제 요금 그대로 유지하라고 함
                             style += f"background-color: {bg}; opacity: 0.9;"
                             content = f"<div style='font-size:9px; color:#757575; font-weight:bold; margin-bottom:2px;'>🤖 변동 없음</div>"
                             content += f"<b>{final_bar}</b><br>{final_price:,}<br>{occ:.0f}%"
@@ -1119,7 +1103,7 @@ def render_master_table(current_df, prev_df, title="", mode="기준", applied_ra
     return html
 
 # ============================================================
-# 21. 시뮬레이터 테이블 (과거 회색 처리)
+# 21. 시뮬레이터 테이블
 # ============================================================
 def render_sim_comparison_table(current_df, df_flight, df_comp,
                                  josun_threshold, flight_threshold,
@@ -1186,7 +1170,6 @@ def render_sim_comparison_table(current_df, df_flight, df_comp,
                 josun_prev_price=josun_prev, events=events, sensitivity=sensitivity
             )
 
-            # 색은 원래대로 유지, 과거는 작게 표시만
             real_bg = BAR_GRADIENT_COLORS.get(real_bar, "#fff")
             real_style = f"border:1px solid #ddd; padding:5px; text-align:center; background:{real_bg}; font-size:11px;"
             sim_bg = SIM_BAR_COLORS.get(sim_bar, "#fff")
@@ -1200,7 +1183,6 @@ def render_sim_comparison_table(current_df, df_flight, df_comp,
                 diff_txt = ""
 
             if is_past:
-                # 과거: 색은 유지, 📜 아이콘만 추가
                 real_content = f"<b>{real_bar}</b><br><span style='font-size:10px;'>{real_price:,}</span><br><span style='font-size:8px; color:#555;'>📜</span>"
                 sim_content = f"<b>{sim_bar}</b><br><span style='font-size:10px;'>{sim_price:,}</span><br>{diff_txt if diff_txt else '<span style=\"font-size:8px; color:#FFD700;\">📜</span>'}"
             else:
@@ -1214,28 +1196,24 @@ def render_sim_comparison_table(current_df, df_flight, df_comp,
     return html
 
 # ============================================================
-# 22. 📄 PDF 생성 (한글 폰트 지원!)
+# 22. 📄 PDF 생성
 # ============================================================
 def _fig_to_image_bytes(fig, width=800, height=400):
-    """Plotly 차트를 PNG 바이트로 변환"""
     try:
         return fig.to_image(format="png", width=width, height=height, scale=2)
     except Exception:
         return None
 
 def _safe_multicell(pdf, w, h, text, max_chars_per_line=None):
-    """안전한 multi_cell - 너비 부족 에러 방지"""
     try:
         pdf.multi_cell(w, h, text)
     except Exception:
-        # 공간 부족 시 폰트 줄이고 재시도
         current_size = pdf.font_size_pt
         try:
             pdf.set_font_size(max(7, current_size - 2))
             pdf.multi_cell(w, h, text)
             pdf.set_font_size(current_size)
         except Exception:
-            # 그래도 실패하면 텍스트 자르기
             pdf.set_font_size(current_size)
             short_text = text[:100] + "..." if len(text) > 100 else text
             try:
@@ -1247,12 +1225,10 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
                          start_date, end_date, curr_df=None, df_flight=None, df_comp=None,
                          events=None, sensitivity=None, active_search_date=None,
                          snapshots_list=None):
-    """고급 컨설팅 수준 PDF 보고서 (안전 버전)"""
     pdf = FPDF()
     pdf.set_margins(20, 20, 20)
     pdf.set_auto_page_break(auto=True, margin=25)
 
-    # 한글 폰트 로드
     font_path = "NanumGothic.ttf"
     font_loaded = False
     if os.path.exists(font_path):
@@ -1267,7 +1243,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
     def T(ko, en):
         return ko if font_loaded else en
 
-    # ============ 페이지 1: 표지 ============
     pdf.add_page()
     pdf.set_fill_color(26, 42, 68)
     pdf.rect(0, 0, 210, 297, 'F')
@@ -1295,7 +1270,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
     pdf.set_text_color(166, 138, 86)
     pdf.cell(0, 10, T("대외비 - 전략 수익 분석 보고서", "CONFIDENTIAL"), 0, 0, 'C')
 
-    # ============ 페이지 2: 핵심 요약 ============
     pdf.add_page()
     pdf.set_text_color(26, 42, 68)
     pdf.set_font(KFONT, 'B', 20)
@@ -1325,7 +1299,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
                           "Revenue opportunity not captured"), ln=True, align='C')
         pdf.ln(15)
 
-        # KPI 테이블
         pdf.set_text_color(0, 0, 0)
         pdf.set_font(KFONT, 'B', 11)
         pdf.set_fill_color(26, 42, 68)
@@ -1352,7 +1325,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
 
         pdf.ln(8)
 
-        # 핵심 메시지
         pdf.set_fill_color(255, 243, 224)
         y_box = pdf.get_y()
         pdf.rect(20, y_box, 170, 35, 'F')
@@ -1369,7 +1341,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
         )
         _safe_multicell(pdf, 160, 5, key_msg)
 
-    # ============ 페이지 3: 차트 ============
     pdf.add_page()
     pdf.set_text_color(26, 42, 68)
     pdf.set_font(KFONT, 'B', 20)
@@ -1432,7 +1403,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
         except Exception:
             pass
 
-# ============ 페이지 4: 대표 사례 ============
     pdf.add_page()
     pdf.set_text_color(26, 42, 68)
     pdf.set_font(KFONT, 'B', 20)
@@ -1463,7 +1433,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
             opp = int(case['기회비용'])
             signal = str(case['시그널'])[:50]
 
-            # 케이스 제목
             pdf.set_fill_color(26, 42, 68)
             pdf.rect(20, pdf.get_y(), 170, 10, 'F')
             pdf.set_xy(22, pdf.get_y() + 2)
@@ -1478,7 +1447,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
 
             pdf.set_text_color(0, 0, 0)
 
-            # 시장 상황
             pdf.set_font(KFONT, 'B', 10)
             pdf.set_text_color(166, 138, 86)
             pdf.cell(0, 6, T("> 시장 상황", "> Market Situation"), ln=True)
@@ -1490,7 +1458,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
             ))
             pdf.ln(2)
 
-            # 우리의 판단
             pdf.set_font(KFONT, 'B', 10)
             pdf.set_text_color(166, 138, 86)
             pdf.cell(0, 6, T("> 우리의 판단", "> Our Decision"), ln=True)
@@ -1502,7 +1469,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
             ))
             pdf.ln(2)
 
-            # 시뮬 제안
             pdf.set_font(KFONT, 'B', 10)
             pdf.set_text_color(166, 138, 86)
             pdf.cell(0, 6, T("> 시뮬레이터 제안", "> Simulator Recommendation"), ln=True)
@@ -1514,7 +1480,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
             ))
             pdf.ln(2)
 
-            # 교훈
             pdf.set_font(KFONT, 'B', 10)
             pdf.set_text_color(166, 138, 86)
             pdf.cell(0, 6, T("> 교훈", "> Lesson"), ln=True)
@@ -1526,7 +1491,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
             ))
             pdf.ln(6)
 
-    # ============ 페이지 5: 경쟁사 벤치마크 ============
     pdf.add_page()
     pdf.set_text_color(26, 42, 68)
     pdf.set_font(KFONT, 'B', 20)
@@ -1562,7 +1526,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
         avg_parnas = sum(parnas_prices) / len(parnas_prices) if parnas_prices else 0
         avg_amber = sum(amber_prices) / len(amber_prices) if amber_prices else 0
 
-        # 테이블
         pdf.set_font(KFONT, 'B', 11)
         pdf.set_fill_color(26, 42, 68)
         pdf.set_text_color(255, 255, 255)
@@ -1597,7 +1560,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
 
         pdf.ln(8)
 
-        # 분석
         pdf.set_fill_color(255, 243, 224)
         y_box = pdf.get_y()
         pdf.rect(20, y_box, 170, 45, 'F')
@@ -1628,7 +1590,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
                 )
             _safe_multicell(pdf, 160, 5, analysis)
 
-    # ============ 페이지 6: 신뢰도 ============
     pdf.add_page()
     pdf.set_text_color(26, 42, 68)
     pdf.set_font(KFONT, 'B', 20)
@@ -1674,7 +1635,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
 
     pdf.ln(3)
 
-    # 검증 결과
     if snapshots_list:
         try:
             verif = verify_simulator_accuracy(
@@ -1715,7 +1675,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
             "Accuracy data available after 2+ weeks of snapshots."
         ))
 
-    # ============ 페이지 7: Action Plan ============
     pdf.add_page()
     pdf.set_text_color(26, 42, 68)
     pdf.set_font(KFONT, 'B', 20)
@@ -1724,7 +1683,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
     pdf.rect(20, 32, 30, 2, 'F')
     pdf.ln(8)
 
-    # 문제점
     pdf.set_font(KFONT, 'B', 13)
     pdf.set_text_color(198, 40, 40)
     pdf.cell(0, 8, T("[ 현재 정책의 3가지 문제점 ]", "[ Three Key Issues ]"), ln=True)
@@ -1752,7 +1710,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
 
     pdf.ln(5)
 
-    # 로드맵
     pdf.set_font(KFONT, 'B', 13)
     pdf.set_text_color(46, 125, 50)
     pdf.cell(0, 8, T("[ 3단계 실행 로드맵 ]", "[ 3-Phase Roadmap ]"), ln=True)
@@ -1778,7 +1735,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
         _safe_multicell(pdf, 0, 5, desc)
         pdf.ln(2)
 
-    # ============ 페이지 8: 결론 ============
     pdf.add_page()
     pdf.set_text_color(26, 42, 68)
     pdf.set_font(KFONT, 'B', 20)
@@ -1824,7 +1780,6 @@ def generate_pdf_report(opp_df, period_label, josun_threshold, flight_threshold,
     )
     _safe_multicell(pdf, 0, 6, conclusion)
 
-    # 푸터
     pdf.set_y(275)
     pdf.set_font(KFONT, '', 8)
     pdf.set_text_color(150, 150, 150)
@@ -1849,95 +1804,41 @@ sensitivity = load_sensitivity()
 # 24. UI - 사이드바
 # ============================================================
 st.title("🏨 Amber Command Center")
-# ⭐ Firebase 연결 진단 패널 (동기화 문제 발생 시 먼저 확인)
-with st.expander("🔧 Firebase 연결 진단", expanded=False):
-    col_d1, col_d2 = st.columns(2)
-    with col_d1:
-        st.markdown("**호텔 DB ([firebase] → amber-rate)**")
-        if db_hotel:
-            st.success("✅ 연결 성공")
-            try:
-                sample_docs = list(db_hotel.collection("daily_snapshots").limit(3).stream())
-                st.caption(f"📦 daily_snapshots 샘플: {len(sample_docs)}개")
-                if sample_docs:
-                    first = sample_docs[0].to_dict()
-                    st.caption(f"📄 키: {', '.join(list(first.keys())[:5])}")
-                    st.caption(f"📅 work_date: {first.get('work_date', '없음')}")
-                else:
-                    st.warning("⚠️ daily_snapshots 비어있음!")
-                    st.caption("→ 요금 에디터에서 먼저 저장하세요")
-            except Exception as e:
-                st.error(f"❌ 조회 에러: {e}")
-        else:
-            st.error("❌ 연결 실패")
-    
-    with col_d2:
-        st.markdown("**항공 DB ([firebase_flight])**")
-        if db_flight:
-            st.success("✅ 연결 성공")
-        else:
-            st.warning("⚠️ 연결 실패")
 st.caption(f"v8.0 · 오늘 기준일: {TODAY.strftime('%Y-%m-%d')} ({WEEKDAYS_KR[TODAY.weekday()]})")
 
 with st.sidebar:
     st.header("📅 과거 기록 조회")
-    
-    # ⭐ 인덴테이션 버그 수정
-    saved_dates = []
-    if db_hotel:
-        try:
-            all_docs = list(db_hotel.collection("daily_snapshots").select(["work_date"]).stream())
-            saved_dates = sorted(list(set([
-                d.to_dict().get('work_date', '') 
-                for d in all_docs 
-                if d.to_dict().get('work_date')
-            ])))
-        except Exception as e:
-            st.caption(f"⚠️ 조회 실패: {str(e)[:80]}")
-    else:
-        st.error("❌ Firebase 연결 실패")
-    
-    if saved_dates:
-        st.markdown("**📌 저장된 날짜 (최근 14일)**")
-        tags = "".join([
-            f"<span style='background:#E8F5E9; border:1px solid #4CAF50; color:#2E7D32; padding:3px 8px; border-radius:12px; margin:2px; font-size:12px; display:inline-block;'>{d[5:]} ✅</span>"
-            for d in saved_dates[-14:]
-        ])
-        st.markdown(f"<div style='margin-bottom:10px;'>{tags}</div>", unsafe_allow_html=True)
-    else:
-        if db_hotel:
-            st.caption("저장된 기록이 아직 없습니다.")
- 
+    try:
+        all_docs = db.collection("daily_snapshots").select(["work_date"]).stream()
+        saved_dates = sorted(list(set([d.to_dict().get('work_date', '') for d in all_docs if d.to_dict().get('work_date')])))
+        if saved_dates:
+            st.markdown("**📌 저장된 날짜 (최근 14일)**")
+            tags = "".join([
+                f"<span style='background:#E8F5E9; border:1px solid #4CAF50; color:#2E7D32; padding:3px 8px; border-radius:12px; margin:2px; font-size:12px; display:inline-block;'>{d[5:]} ✅</span>"
+                for d in saved_dates[-14:]
+            ])
+            st.markdown(f"<div style='margin-bottom:10px;'>{tags}</div>", unsafe_allow_html=True)
+    except: pass
+
     work_day = st.date_input("조회 날짜", value=date.today())
     if st.button("📂 과거 기록 불러오기"):
-        if db_hotel:
-            try:
-                docs = db_hotel.collection("daily_snapshots").where(
-                    "work_date", "==", work_day.strftime("%Y-%m-%d")
-                ).limit(1).stream()
-                found = False
-                for doc in docs:
-                    d_dict = doc.to_dict()
-                    st.session_state.cmd_today_df = pd.DataFrame(d_dict['data'])
-                    if not st.session_state.cmd_today_df.empty and 'Date' in st.session_state.cmd_today_df.columns:
-                        st.session_state.cmd_today_df['Date'] = pd.to_datetime(st.session_state.cmd_today_df['Date']).dt.date
-                    if 'prev_data' in d_dict and d_dict['prev_data']:
-                        st.session_state.cmd_prev_df = pd.DataFrame(d_dict['prev_data'])
-                        if not st.session_state.cmd_prev_df.empty and 'Date' in st.session_state.cmd_prev_df.columns:
-                            st.session_state.cmd_prev_df['Date'] = pd.to_datetime(st.session_state.cmd_prev_df['Date']).dt.date
-                    else:
-                        st.session_state.cmd_prev_df = pd.DataFrame()
-                    st.session_state.cmd_compare_label = f"불러온 과거 기록: {work_day}"
-                    found = True
-                if found:
-                    st.success(f"✅ {work_day} 로드 완료!")
-                    st.rerun()
-                else:
-                    st.warning(f"{work_day}에 저장된 기록 없음")
-            except Exception as e:
-                st.error(f"로드 실패: {e}")
-        else:
-            st.error("❌ DB 연결 안 됨")
+        docs = db.collection("daily_snapshots").where("work_date", "==", work_day.strftime("%Y-%m-%d")).limit(1).stream()
+        found = False
+        for doc in docs:
+            d_dict = doc.to_dict()
+            st.session_state.cmd_today_df = pd.DataFrame(d_dict['data'])
+            if not st.session_state.cmd_today_df.empty and 'Date' in st.session_state.cmd_today_df.columns:
+                st.session_state.cmd_today_df['Date'] = pd.to_datetime(st.session_state.cmd_today_df['Date']).dt.date
+            if 'prev_data' in d_dict and d_dict['prev_data']:
+                st.session_state.cmd_prev_df = pd.DataFrame(d_dict['prev_data'])
+                if not st.session_state.cmd_prev_df.empty and 'Date' in st.session_state.cmd_prev_df.columns:
+                    st.session_state.cmd_prev_df['Date'] = pd.to_datetime(st.session_state.cmd_prev_df['Date']).dt.date
+            else:
+                st.session_state.cmd_prev_df = pd.DataFrame()
+            st.session_state.cmd_compare_label = f"불러온 과거 기록: {work_day}"
+            found = True
+        if found: st.success("스냅샷 로드 완료")
+        else: st.warning("데이터 없음")
 
     st.divider()
     st.header("🎯 시뮬레이터 기준값")
@@ -1970,48 +1871,34 @@ with st.sidebar:
     st.header("🔄 요금 에디터 연동")
     st.info("요금 에디터 사이트에서 업로드하고 확정한 최신 데이터를 불러옵니다. (파일 별도 업로드 불필요)")
     
-    if st.button("🚀 최신 데이터 동기화", type="primary", use_container_width=True, disabled=(not db_hotel)):
+    if st.button("🚀 최신 데이터 동기화", type="primary", use_container_width=True):
         with st.spinner("요금 에디터 데이터 불러오는 중..."):
-            st.cache_data.clear()
             
-            latest_db, save_dt = get_latest_snapshot(db_hotel)
+            st.cache_data.clear() 
+            
+            latest_db, save_dt = get_latest_snapshot()
             
             if not latest_db.empty:
                 st.session_state.cmd_today_df = latest_db.sort_values(by=['Date', 'RoomID'])
                 
-                # 어제 데이터(비교군) 가져오기
-                try:
-                    docs = db_hotel.collection("daily_snapshots").where(
-                        "work_date", "<", date.today().strftime("%Y-%m-%d")
-                    ).order_by(
-                        "work_date", direction=firestore.Query.DESCENDING
-                    ).limit(1).stream()
-                    
-                    prev_found = False
-                    for doc in docs:
-                        p_dict = doc.to_dict()
-                        p_df = pd.DataFrame(p_dict.get('data', []))
-                        if not p_df.empty and 'Date' in p_df.columns:
-                            p_df['Date'] = pd.to_datetime(p_df['Date']).dt.date
-                            st.session_state.cmd_prev_df = p_df
-                            prev_found = True
-                    
-                    if not prev_found:
-                        st.session_state.cmd_prev_df = pd.DataFrame()
-                except Exception as e:
-                    st.warning(f"어제 데이터 로드 실패: {e}")
-                    st.session_state.cmd_prev_df = pd.DataFrame()
+                # 어제 데이터(비교군) 가져오기 로직
+                docs = db.collection("daily_snapshots").where("work_date", "<", date.today().strftime("%Y-%m-%d")).order_by("work_date", direction=firestore.Query.DESCENDING).limit(1).stream()
+                prev_found = False
+                for doc in docs:
+                    p_dict = doc.to_dict()
+                    p_df = pd.DataFrame(p_dict.get('data', []))
+                    if not p_df.empty and 'Date' in p_df.columns:
+                        p_df['Date'] = pd.to_datetime(p_df['Date']).dt.date
+                        st.session_state.cmd_prev_df = p_df
+                        prev_found = True
                 
+                if not prev_found:
+                    st.session_state.cmd_prev_df = pd.DataFrame()
+                    
                 st.session_state.cmd_compare_label = f"✅ 동기화 완료 (요금 에디터 기준: {save_dt})"
-                st.success(f"✅ {len(latest_db):,}개 행 동기화 완료!")
                 st.rerun()
             else:
-                st.warning("⚠️ 요금 에디터에 저장된 데이터가 없습니다.")
-                st.caption("""
-                **체크리스트:**
-                1. 요금 에디터에서 데이터 저장 버튼을 눌렀는지?
-                2. Firebase 콘솔 → amber-rate → Firestore → daily_snapshots 확인
-                3. 문서 안에 work_date, save_time, data 필드가 있는지?
+                st.warning("요금 에디터에 등록된 최신 데이터가 없습니다.")
 
 # ============================================================
 # 메인 영역
@@ -2107,7 +1994,7 @@ if not st.session_state.cmd_today_df.empty:
 
     # 📜 과거 기록 (접힌 상태)
     if fixed_alerts_past:
-        with st.expander(f"📜 마감된 과거 기록 {len(fixed_alerts_past)}건 보기", expanded=False):
+        with st.expander(f"📜 지난 기록 ({len(fixed_alerts_past)}건) - 이미 마감된 고점유율 날짜"):
             st.caption("이미 지나간 날짜들 - 당시 수기 인상 대상이었던 날들의 기록")
             for a in fixed_alerts_past[-10:]:
                 level_color = "#C62828" if a['level'] == 'critical' else "#FF6F00"
@@ -2805,7 +2692,7 @@ if not st.session_state.cmd_today_df.empty:
                         except Exception as e:
                             st.error(f"실패: {e}")
 
-# =============== TAB 11: 💡 종합 인사이트 (경영진 보고용) ===============
+    # =============== TAB 11: 💡 종합 인사이트 (경영진 보고용) ===============
     with tab11:
         st.markdown("""
         <div style='background: linear-gradient(135deg, #1E3C72 0%, #2A5298 100%); 
@@ -2955,7 +2842,3 @@ else:
     - 🎯 **할 일 체크리스트** (의사결정 태그)
     - 📊 **전년 동기 비교** (작년 같은 날 vs 올해)
     """)
-
-            
-                                    
-

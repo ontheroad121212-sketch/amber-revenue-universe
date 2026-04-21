@@ -14,24 +14,9 @@ import numpy as np
 # =============================================================================
 # 1. 시스템 설정 및 세션 초기화
 # =============================================================================
-st.set_page_config(page_title="2026 비상 시크릿 랩", layout="wide")
 
 if 'otb_data' not in st.session_state:
     st.session_state['otb_data'] = pd.DataFrame()
-
-def check_password():
-    if "password_guessed" not in st.session_state:
-        st.session_state["password_guessed"] = False
-    
-    if not st.session_state["password_guessed"]:
-        st.title("🔐 Secret Strategy Access")
-        st.write("관계자 외 출입금지")
-        password = st.text_input("접속 암호를 입력하세요", type="password")
-        if password == "2026viva":
-            st.session_state["password_guessed"] = True
-            st.rerun()
-        return False
-    return True
 
 # =========================================================================
 # 2. 글로벌 DB 완벽 연결 (중복 연결 에러 원천 차단)

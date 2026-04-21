@@ -1216,58 +1216,111 @@ with tabs[1]:
         st.info("PMS 데이터를 업로드해 주세요.")
         
 with tabs[2]:
-    fig3 = go.Figure(); fig3.add_trace(go.Bar(x=list(range(7)), y=[100, 150, 300, 500, 700, 900, 1000], name="수요", opacity=0.3))
-    fig3.add_trace(go.Scatter(x=list(range(7)), y=[35]*7, name="ADR", yaxis="y2", line_width=4)); fig3.update_layout(template="plotly_dark", yaxis2=dict(overlaying="y", side="right")); st.plotly_chart(fig3, use_container_width=True)
+        st.subheader(f"⚖️ {selected_month}월 수요(RN) vs 단가(ADR) 전략 매트릭스")
+        st.info("💡 **[Price vs Demand]** 객실 판매량(RN)을 채우기 위해 단가(ADR)를 얼마나 훼손하고 있는지 확인하는 실시간 이중축 차트입니다.")
+        
+        if not df_full_pms.empty:
+            t2_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].copy()
+            if not t2_df.empty:
+                daily_perf = t2_df.groupby(t2_df['Stay_Date'].dt.date).agg(RN=('Daily_RN', 'sum'), Rev=('Daily_Rev', 'sum')).reset_index()
+                daily_perf['ADR'] = daily_perf['Rev'] / daily_perf['RN'].replace(0, 1)
+                
+                from plotly.subplots import make_subplots
+                fig3 = make_subplots(specs=[[{"secondary_y": True}]])
+                fig3.add_trace(go.Bar(x=daily_perf['Stay_Date'], y=daily_perf['RN'], name="판매 객실(RN)", marker_color='rgba(0, 209, 255, 0.4)'), secondary_y=False)
+                fig3.add_trace(go.Scatter(x=daily_perf['Stay_Date'], y=daily_perf['ADR'], name="평균 단가(ADR)", mode='lines+markers', line=dict(color='#FFD700', width=3)), secondary_y=True)
+                
+                fig3.update_layout(template="plotly_dark", height=400, hovermode="x unified")
+                fig3.update_yaxes(title_text="객실 수 (RN)", secondary_y=False, showgrid=False)
+                fig3.update_yaxes(title_text="단가 (원)", secondary_y=True, showgrid=True)
+                st.plotly_chart(fig3, use_container_width=True)
+            else:
+                st.warning("해당 월의 예약 데이터가 없습니다.")
+        else:
+            st.warning("PMS 데이터가 업로드되지 않았습니다.")
 
-with tabs[3]:
-    if real_channel_df is not None: 
-        c_col = real_channel_df.columns[0]; r_col = real_channel_df.columns[1]
-        fig4 = px.pie(real_channel_df, values=r_col, names=c_col, hole=0.4, title="Channel Share", template="plotly_dark"); st.plotly_chart(fig4, use_container_width=True)
+    with tabs[3]:
+        st.subheader("🍕 채널별 수익 기여도 (Channel Mix & Profitability)")
+        st.info("💡 **[Channel Mix]** 어떤 거래처가 가장 돈이 되는지(매출 점유율)를 직관적으로 분석합니다.")
+        
+        if 'real_channel_df' in locals() and real_channel_df is not None and not real_channel_df.empty:
+            c_col = real_channel_df.columns[0]
+            r_col = real_channel_df.columns[1]
+            
+            fig4 = px.pie(real_channel_df, values=r_col, names=c_col, hole=0.5, 
+                          color_discrete_sequence=px.colors.sequential.Tealgrn)
+            fig4.update_traces(textposition='inside', textinfo='percent+label')
+            fig4.update_layout(template="plotly_dark", height=400,
+                               annotations=[dict(text='Channel<br>Mix', x=0.5, y=0.5, font_size=20, showarrow=False)])
+            st.plotly_chart(fig4, use_container_width=True)
+        else:
+            # Fallback: df_full_pms에서 거래처/Channel 컬럼을 찾아 Treemap으로 우아하게 그려줍니다.
+            ch_col = 'Channel' if 'Channel' in df_full_pms.columns else ('거래처' if '거래처' in df_full_pms.columns else None)
+            if ch_col and not df_full_pms.empty:
+                ch_df = df_full_pms[df_full_pms['Stay_Date'].dt.month == selected_month].groupby(ch_col)['Daily_Rev'].sum().reset_index()
+                ch_df = ch_df[ch_df['Daily_Rev'] > 0]
+                
+                if not ch_df.empty:
+                    fig4 = px.treemap(ch_df, path=[ch_col], values='Daily_Rev', color='Daily_Rev', 
+                                      color_continuous_scale='Viridis')
+                    fig4.update_layout(template="plotly_dark", height=400)
+                    st.plotly_chart(fig4, use_container_width=True)
+                else:
+                    st.warning("분석할 채널 실적이 아직 없습니다.")
+            else:
+                st.warning("채널/거래처 데이터를 찾을 수 없습니다. (데이터 양식을 확인해주세요)")
 
-with tabs[4]:
-    st.header(f"🔮 {selected_month}월 매출 마감 예보 시뮬레이션")
-    st.info("💡 **[Revenue Architect Forecast]** 단순 산술 평균이 아닌, 오라클 S-커브를 역산하여 남은 기간의 픽업 예상치를 더한 '정밀 마감 예보'입니다.")
-    
-    num_days = calendar.monthrange(2026, selected_month)[1]
-    dates = pd.date_range(start=f"2026-{selected_month:02d}-01", periods=num_days)
-    
-    cur_rev_unit = cur_rev / 100000000 
-    target_goal_unit = tgt_m['rev'] / 100000000
-    
-    if 'expected_pct' in locals() and expected_pct > 0:
-        forecast_final_unit = cur_rev_unit / expected_pct
-    else:
-        forecast_final_unit = cur_rev_unit
+    with tabs[4]:
+        st.subheader(f"🔮 {selected_month}월 매출 마감 예보 시뮬레이션")
+        st.info("💡 **[Revenue Architect Forecast]** 단순 산술 평균이 아닌, 오라클 S-커브를 역산하여 남은 기간의 픽업 예상치를 더한 '정밀 마감 예보'입니다.")
+        
+        try:
+            num_days = calendar.monthrange(2026, selected_month)[1]
+            dates = pd.date_range(start=f"2026-{selected_month:02d}-01", periods=num_days)
+            
+            # [안전장치] 탭 0에서 계산된 변수들을 직접 안전하게 가져옵니다. (에러 원천 차단)
+            safe_cur_rev = cur_rev if 'cur_rev' in dir() else 0
+            safe_tgt_m = tgt_m if 'tgt_m' in dir() else {"rev": 100000000}
+            safe_expected_pct = expected_pct if 'expected_pct' in dir() and expected_pct > 0 else 1.0
+            safe_pacing_curve = pacing_curve_ratio if 'pacing_curve_ratio' in dir() else np.linspace(0.5, 1.0, num_days)
+            safe_op = o_p if 'o_p' in dir() else np.linspace(0, safe_tgt_m['rev']/100000000, num_days)
+            safe_booking_pace = booking_pace_m if 'booking_pace_m' in dir() else []
 
-    forecast_line = [None] * num_days
-    effective_d = curr_d if curr_d <= num_days else num_days
-    
-    for i in range(num_days):
-        day_ratio = pacing_curve_ratio[i]
-        forecast_line[i] = forecast_final_unit * day_ratio
+            cur_rev_unit = safe_cur_rev / 100000000 
+            target_goal_unit = safe_tgt_m['rev'] / 100000000
+            
+            # 궤도 이탈률을 역산한 최종 예상 마감액
+            forecast_final_unit = cur_rev_unit / safe_expected_pct if safe_expected_pct > 0 else cur_rev_unit
 
-    fig_fcst = go.Figure()
-    fig_fcst.add_trace(go.Scatter(x=dates, y=o_p, name="Target", line=dict(color="rgba(0,209,255,0.3)", dash="dash")))
-    
-    if 'booking_pace_m' in locals() and booking_pace_m:
-        fig_fcst.add_trace(go.Scatter(x=dates[:len(booking_pace_m)], y=booking_pace_m, name="Actual (OTB)", line=dict(color="#00D1FF", width=4)))
-    
-    fig_fcst.add_trace(go.Scatter(x=dates, y=forecast_line, name="Oracle Forecast", line=dict(color="#FFD700", width=2, dash="dot")))
-    
-    fig_fcst.update_layout(template="plotly_dark", height=450, title=f"{selected_month}월 매출 마감 예측 (단위: 억원)", yaxis_title="누적 매출 (억)")
-    st.plotly_chart(fig_fcst, use_container_width=True)
-    
-    c1, c2, c3 = st.columns(3)
-    with c1:
-        st.metric("현재 누적 매출 (OTB)", f"{cur_rev_unit:.2f} 억")
-    with c2:
-        target_diff = forecast_final_unit - target_goal_unit
-        st.metric("월말 예상 매출 (Forecast)", f"{forecast_final_unit:.2f} 억", f"{target_diff:+.2f} 억")
-    with c3:
-        achievement_rate = (forecast_final_unit / target_goal_unit * 100) if target_goal_unit > 0 else 0
-        st.metric("예상 달성률", f"{achievement_rate:.1f}%", delta=f"{achievement_rate-100:.1f}%p")
+            forecast_line = [None] * num_days
+            for i in range(num_days):
+                forecast_line[i] = forecast_final_unit * safe_pacing_curve[i]
 
-    st.success(f"📢 **오라클 브리핑:** 현재 {selected_month}월 {curr_d}일 기준, 전체 매출의 {expected_pct*100:.1f}%가 이미 확보되어 있어야 하는 페이스입니다. 이를 역산하면 최종 마감은 **{forecast_final_unit:.2f}억**으로 예상되며, 이는 당초 목표 대비 **{achievement_rate:.1f}%** 수준입니다.")
+            fig_fcst = go.Figure()
+            fig_fcst.add_trace(go.Scatter(x=dates, y=safe_op, name="Target (목표 곡선)", line=dict(color="rgba(0,209,255,0.3)", dash="dash")))
+            
+            if safe_booking_pace:
+                fig_fcst.add_trace(go.Scatter(x=dates[:len(safe_booking_pace)], y=safe_booking_pace, name="Actual (현재 OTB)", line=dict(color="#00D1FF", width=4)))
+            
+            fig_fcst.add_trace(go.Scatter(x=dates, y=forecast_line, name="Oracle Forecast (마감 예측)", line=dict(color="#FFD700", width=2, dash="dot")))
+            
+            fig_fcst.update_layout(template="plotly_dark", height=450, yaxis_title="누적 매출 (억)")
+            st.plotly_chart(fig_fcst, use_container_width=True)
+            
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                st.metric("현재 누적 매출 (OTB)", f"{cur_rev_unit:.2f} 억")
+            with c2:
+                target_diff = forecast_final_unit - target_goal_unit
+                st.metric("월말 예상 매출 (Forecast)", f"{forecast_final_unit:.2f} 억", f"{target_diff:+.2f} 억")
+            with c3:
+                achievement_rate = (forecast_final_unit / target_goal_unit * 100) if target_goal_unit > 0 else 0
+                st.metric("예상 달성률", f"{achievement_rate:.1f}%", delta=f"{achievement_rate-100:.1f}%p")
+
+            st.success(f"📢 **오라클 브리핑:** 현재 기준, 목표 궤도상 전체 매출의 **{safe_expected_pct*100:.1f}%**가 확보되어야 하는 페이스입니다. 현재 OTB를 이 페이스로 역산하면 최종 마감은 **{forecast_final_unit:.2f}억**으로 예측되며, 이는 당초 목표 대비 **{achievement_rate:.1f}%** 수준입니다.")
+            
+        except Exception as e:
+            st.error(f"예측 데이터를 구성하는 중 오류가 발생했습니다. (Tab 0의 데이터를 확인해주세요)")
 
 with tabs[5]: st.subheader("🌟 리뷰 분석"); st.info("연동 대기 중")
 

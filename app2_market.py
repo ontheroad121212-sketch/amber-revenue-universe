@@ -223,18 +223,22 @@ def get_db_bookings_only():
     except: return pd.DataFrame()
 
 # =========================================================================
-# 4. 메인 UI 렌더링 시작 (통합 로그인 완료 후 바로 실행)
+# 4. 메인 UI 렌더링 시작 (로그인 통과 후 실행)
 # =========================================================================
+
+# 1️⃣ 여기는 '본문' 영역입니다 (화면 중앙)
 st.title("🚀 2026 비상: 시크릿 전략 페이지")
 st.markdown("---")
 
+# 2️⃣ 여기는 '사이드바' 영역입니다 (왼쪽 메뉴)
 with st.sidebar:
     st.header("📂 데이터 사령부")
     uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
+    
     if uploaded_files:
         parsed_df = parse_uploaded_files(uploaded_files)
         if not parsed_df.empty:
-            # 💡 아까 세션 이름 바꿨다면 여기도 viva_otb_data 로 맞춰주세요!
+            # 아까 변경하신 세션 변수명(viva_otb_data 등)이 있다면 그 이름으로 맞춰주세요!
             st.session_state['viva_otb_data'] = parsed_df
             st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
     

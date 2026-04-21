@@ -1,227 +1,10 @@
 import streamlit as st
-import firebase_admin
-from firebase_admin import credentials, firestore
-import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
-
-# -----------------------------------------------------------------------------
-# 1. 파이어베이스 연결 (통합 포털 호환용)
-# -----------------------------------------------------------------------------
-# 페이지 설정(st.set_page_config)은 main.py에서 하므로 삭제했습니다.
-
-# 1, 3번 앱에서 이미 연결해둔 DB(flight_app)가 있으면 그대로 빌려 씁니다.
-try:
-    app_flight = firebase_admin.get_app("flight_app")
-except ValueError:
-    # 만약 연결이 안 되어 있다면 여기서 안전하게 연결합니다.
-    if "firebase_flight" in st.secrets:
-        cred = credentials.Certificate(dict(st.secrets["firebase_flight"]))
-    else:
-        cred = credentials.Certificate("serviceAccountKey.json")
-    app_flight = firebase_admin.initialize_app(cred, name="flight_app")
-
-db = firestore.client(app=app_flight)
-
-# -----------------------------------------------------------------------------
-# 2. 데이터 로드 및 전처리 함수
-# -----------------------------------------------------------------------------
-@st.cache_data(ttl=600) # 10분마다 데이터 갱신
-def load_data():
-    # 파이어베이스에서 모든 데이터 가져오기
-    docs = db.collection('hotel_comp_prices').stream()
-    
-    data = []
-    for doc in docs:
-        d = doc.to_dict()
-        # 데이터 정제 (딕셔너리 리스트로 변환)
-        row = {
-            "CheckIn_Date": d.get("date"),            # 숙박 예정일 (예: 2026-03-28)
-            "Search_Date": d.get("search_date_str"),  # 크롤링한 날짜 (예: 20260206)
-            "Hotel": d.get("hotel_name"),
-            "Min_Price": d.get("price"),
-            "Amber_Twin": d.get("hill_amber_twin"),    # 엠버 전용
-            "Pine_Double": d.get("hill_pine_double"),  # 엠버 전용
-            "Timestamp": d.get("crawled_at")
-        }
-        data.append(row)
-    
-    if not data:
-        return pd.DataFrame()
-
-    df = pd.DataFrame(data)
-    
-    # 날짜 형식 변환
-    df["CheckIn_Date"] = pd.to_datetime(df["CheckIn_Date"])
-    df["Search_Date_DT"] = pd.to_datetime(df["Search_Date"], format="%Y%m%d")
-    
-    # 정렬
-    df = df.sort_values(by=["CheckIn_Date", "Search_Date_DT"])
-    return df
-
-# -----------------------------------------------------------------------------
-# 3. 메인 대시보드 UI
-# -----------------------------------------------------------------------------
-st.title("🏨 Jeju Hotel Market Intelligence")
-st.markdown(f"**엠버퓨어힐 전략 상황실** | *Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
-
-# 데이터 로드
-df = load_data()
-
-if df.empty:
-    st.warning("⚠️ 아직 수집된 데이터가 없습니다. 'hotel_spy.py'를 먼저 실행해서 데이터를 모아주세요.")
-else:
-    # 가장 최근에 조사한 데이터만 필터링 (현재 시장가)
-    latest_search_date = df["Search_Date"].max()
-    current_market_df = df[df["Search_Date"] == latest_search_date].copy()
-
-    # 상단 요약 메트릭
-    st.markdown("---")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    # 엠버 평균 최저가 계산
-    amber_avg = current_market_df[current_market_df["Hotel"]=="Amber_Pure_Hill"]["Min_Price"].mean()
-    parnas_avg = current_market_df[current_market_df["Hotel"]=="Parnas_Jeju"]["Min_Price"].mean()
-    josun_avg = current_market_df[current_market_df["Hotel"]=="Grand_Josun"]["Min_Price"].mean()
-
-    col1.metric("엠버퓨어힐 평균가", f"{int(amber_avg):,}원" if pd.notnull(amber_avg) else "-")
-    col2.metric("파르나스 제주 평균가", f"{int(parnas_avg):,}원" if pd.notnull(parnas_avg) else "-", 
-                delta=f"{int(amber_avg - parnas_avg):,}원" if pd.notnull(parnas_avg) else None, delta_color="inverse")
-    col3.metric("그랜드조선 평균가", f"{int(josun_avg):,}원" if pd.notnull(josun_avg) else "-",
-                delta=f"{int(amber_avg - josun_avg):,}원" if pd.notnull(josun_avg) else None, delta_color="inverse")
-    col4.metric("데이터 기준일", f"{latest_search_date} (Latest)")
-
-    st.markdown("---")
-
-    # 탭 구성
-    tab1, tab2, tab3 = st.tabs(["⚔️ 경쟁사 비교 (Market)", "💎 엠버 객실 전략 (Internal)", "📈 가격 변동 추이 (History)"])
-
-    # -------------------------------------------------------------------------
-    # [Tab 1] 경쟁사 비교 그래프
-    # -------------------------------------------------------------------------
-    with tab1:
-        st.subheader(f"📅 일별 최저가 흐름 (기준: {latest_search_date} 조사)")
-        
-        # 선 그래프 그리기
-        fig_comp = px.line(current_market_df, 
-                           x="CheckIn_Date", 
-                           y="Min_Price", 
-                           color="Hotel",
-                           markers=True,
-                           color_discrete_map={
-                               "Amber_Pure_Hill": "#FF4B4B",  # 엠버는 강조색(Red)
-                               "Parnas_Jeju": "#1f77b4",      # 파르나스(Blue)
-                               "Grand_Josun": "#2ca02c"       # 조선(Green)
-                           },
-                           hover_data={"Min_Price": ":,.0f"})
-        
-        fig_comp.update_layout(height=500, xaxis_title="체크인 날짜", yaxis_title="최저가 (원)")
-        st.plotly_chart(fig_comp, use_container_width=True)
-
-    # -------------------------------------------------------------------------
-    # [Tab 2] 엠버 내부 객실 분석
-    # -------------------------------------------------------------------------
-    with tab2:
-        st.subheader("💎 엠버퓨어힐 객실 등급별 가격 Gap 분석")
-        
-        amber_data = current_market_df[current_market_df["Hotel"] == "Amber_Pure_Hill"].copy()
-        
-        if amber_data.empty:
-            st.info("엠버퓨어힐 데이터가 없습니다.")
-        else:
-            # 그래프용 데이터 구조 변경 (Melt)
-            # 최저가, 힐엠버트윈, 힐파인더블을 하나의 컬럼으로 합침
-            amber_melted = amber_data.melt(id_vars=["CheckIn_Date"], 
-                                           value_vars=["Min_Price", "Amber_Twin", "Pine_Double"],
-                                           var_name="Room_Type", value_name="Price")
-            
-            # 결측치 제거 (가격 없는 날 제외)
-            amber_melted = amber_melted.dropna(subset=["Price"])
-
-            fig_internal = px.line(amber_melted, 
-                                   x="CheckIn_Date", 
-                                   y="Price", 
-                                   color="Room_Type",
-                                   markers=True,
-                                   line_dash="Room_Type", # 선 스타일 다르게
-                                   title="객실 타입별 가격 차이 (Spread)",
-                                   color_discrete_map={
-                                       "Min_Price": "gray",
-                                       "Amber_Twin": "#FFA15A",
-                                       "Pine_Double": "#EF553B"
-                                   })
-            
-            fig_internal.update_traces(hovertemplate='%{y:,.0f}원')
-            fig_internal.update_layout(height=500, xaxis_title="체크인 날짜", yaxis_title="판매가 (원)")
-            st.plotly_chart(fig_internal, use_container_width=True)
-            
-            # [전략 인사이트] Gap 통계 보여주기
-            st.markdown("#### 💡 Strategy Insight: Price Gap")
-            gap_col1, gap_col2 = st.columns(2)
-            
-            # 평균 Gap 계산
-            amber_data["Gap_Twin"] = amber_data["Amber_Twin"] - amber_data["Min_Price"]
-            amber_data["Gap_Double"] = amber_data["Pine_Double"] - amber_data["Min_Price"]
-            
-            avg_gap_twin = amber_data["Gap_Twin"].mean()
-            avg_gap_double = amber_data["Gap_Double"].mean()
-            
-            gap_col1.info(f"**힐 엠버 트윈 프리미엄:** 평균 +{int(avg_gap_twin):,}원 (vs 최저가)")
-            gap_col2.success(f"**힐 파인 더블 프리미엄:** 평균 +{int(avg_gap_double):,}원 (vs 최저가)")
-
-    # -------------------------------------------------------------------------
-    # [Tab 3] 가격 변동 추이 (Time Travel)
-    # -------------------------------------------------------------------------
-    with tab3:
-        st.subheader("📈 특정 날짜의 가격 변동 이력 (언제 가격이 올랐나?)")
-        
-        # 사용자가 분석하고 싶은 '체크인 날짜' 선택
-        available_dates = sorted(df["CheckIn_Date"].unique())
-        selected_date = st.selectbox("체크인 날짜를 선택하세요:", available_dates, format_func=lambda x: x.strftime('%Y-%m-%d'))
-        
-        # 선택한 날짜의 데이터만 필터링
-        history_df = df[df["CheckIn_Date"] == selected_date].copy()
-        
-        if history_df.empty:
-            st.write("선택한 날짜의 기록이 없습니다.")
-        else:
-            # x축을 '조사한 날짜(Search_Date)'로 설정하여 시계열 변화 확인
-            fig_history = go.Figure()
-
-            # 1. 엠버 최저가
-            amber_hist = history_df[history_df["Hotel"]=="Amber_Pure_Hill"]
-            fig_history.add_trace(go.Scatter(x=amber_hist["Search_Date_DT"], y=amber_hist["Min_Price"], 
-                                             mode='lines+markers', name='엠버 최저가', line=dict(color='red')))
-            
-            # 2. 엠버 트윈/더블
-            fig_history.add_trace(go.Scatter(x=amber_hist["Search_Date_DT"], y=amber_hist["Amber_Twin"], 
-                                             mode='lines+markers', name='힐 엠버 트윈', line=dict(color='orange', dash='dot')))
-            
-            # 3. 파르나스
-            parnas_hist = history_df[history_df["Hotel"]=="Parnas_Jeju"]
-            fig_history.add_trace(go.Scatter(x=parnas_hist["Search_Date_DT"], y=parnas_hist["Min_Price"], 
-                                             mode='lines+markers', name='파르나스', line=dict(color='blue')))
-            
-            # 4. 조선
-            josun_hist = history_df[history_df["Hotel"]=="Grand_Josun"]
-            fig_history.add_trace(go.Scatter(x=josun_hist["Search_Date_DT"], y=josun_hist["Min_Price"], 
-                                             mode='lines+markers', name='조선', line=dict(color='green')))
-
-            fig_history.update_layout(title=f"{selected_date.strftime('%Y-%m-%d')} 숙박 요금의 변화 추이",
-                                      xaxis_title="데이터 수집일 (Search Date)",
-                                      yaxis_title="가격 (원)",
-                                      hovermode="x unified")
-            st.plotly_chart(fig_history, use_container_width=True)
-            
-            st.caption("※ X축은 데이터를 수집한 날짜입니다. 그래프가 우상향하면 가격이 오르고 있다는 뜻입니다.")
-
-import streamlit as st
 import pandas as pd
 import firebase_admin
 from firebase_admin import credentials, firestore
 import os
 import requests
+import time
 from datetime import datetime, timedelta
 import plotly.express as px
 import plotly.graph_objects as go
@@ -282,7 +65,11 @@ except ValueError:
         cred_f = credentials.Certificate(secret_dict)
         app_flight = firebase_admin.initialize_app(cred_f, name="flight_app")
     else:
-        app_flight = None
+        try:
+            cred_f = credentials.Certificate("serviceAccountKey.json")
+            app_flight = firebase_admin.initialize_app(cred_f, name="flight_app")
+        except:
+            app_flight = None
 db_flight = firestore.client(app=app_flight) if app_flight else None
 
 
@@ -367,6 +154,48 @@ def get_comp_data_only():
         return pd.DataFrame()
     except: return pd.DataFrame()
 
+# ============================================================
+# [원 대시보드.py 전용] 경쟁사 가격 데이터 로더
+# 파일1의 load_data() 함수를 이름 변경해서 그대로 이식
+# (파일1 탭들에서 사용하는 컬럼 구조가 달라서 별도 유지)
+# ============================================================
+@st.cache_data(ttl=600)
+def load_hotel_comp_data_legacy():
+    """원래 대시보드.py의 load_data() 함수. 파일1 탭 3개에서 사용."""
+    if not db_flight:
+        return pd.DataFrame()
+    try:
+        docs = db_flight.collection('hotel_comp_prices').stream()
+        
+        data = []
+        for doc in docs:
+            d = doc.to_dict()
+            row = {
+                "CheckIn_Date": d.get("date"),            # 숙박 예정일 (예: 2026-03-28)
+                "Search_Date": d.get("search_date_str"),  # 크롤링한 날짜 (예: 20260206)
+                "Hotel": d.get("hotel_name"),
+                "Min_Price": d.get("price"),
+                "Amber_Twin": d.get("hill_amber_twin"),    # 엠버 전용
+                "Pine_Double": d.get("hill_pine_double"),  # 엠버 전용
+                "Timestamp": d.get("crawled_at")
+            }
+            data.append(row)
+        
+        if not data:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data)
+        
+        # 날짜 형식 변환
+        df["CheckIn_Date"] = pd.to_datetime(df["CheckIn_Date"])
+        df["Search_Date_DT"] = pd.to_datetime(df["Search_Date"], format="%Y%m%d", errors='coerce')
+        
+        # 정렬
+        df = df.sort_values(by=["CheckIn_Date", "Search_Date_DT"])
+        return df
+    except:
+        return pd.DataFrame()
+
 @st.cache_data(ttl=600)
 def get_rent_data_only():
     try:
@@ -431,7 +260,7 @@ if check_password():
             st.rerun()
 
         # -----------------------------------------------------------------
-        # [NEW] 글로벌 데이터 타임머신 (모든 탭 동기화)
+        # 글로벌 데이터 타임머신 (모든 탭 동기화)
         # -----------------------------------------------------------------
         st.markdown("---")
         st.markdown("### 🕰️ 데이터 타임머신")
@@ -484,7 +313,7 @@ if check_password():
         
         st.markdown("---")
 
-        # 스냅샷 전략 타임머신 (7번 탭 전용)
+        # 스냅샷 전략 타임머신 (전략 사령부 탭 전용)
         st.markdown("### 🕰️ 전략 타임머신")
         snapshot_options = ["현재 (Real-time)"]
         
@@ -499,14 +328,25 @@ if check_password():
             "과거 시점 데이터 불러오기", 
             snapshot_options,
             index=0,
-            help="선택하면 [Tab 7]의 전체 대시보드가 해당 시점으로 복구됩니다."
+            help="선택하면 [전략 사령부] 탭의 전체 대시보드가 해당 시점으로 복구됩니다."
         )
         st.session_state['selected_snapshot_id'] = selected_snapshot
 
     # =========================================================================
-    # 5. 탭 구성 (UI)
+    # 5. 탭 구성 (UI) - 파일1 탭 3개 + 파일2 탭 7개 = 총 10개 탭
     # =========================================================================
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs(["✈️ 항공권 (수요)", "🏨 엠버 예약(분석)", "⚔️ 경쟁사 비교", "🚗 렌터카 분석", "📊 입도객 추이", "📜 과거 분석 (Pace)", "🧠 전략 사령부 (BI)"])
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+        "✈️ 항공권 (수요)",
+        "🏨 엠버 예약(분석)",
+        "⚔️ 경쟁사 비교",
+        "🚗 렌터카 분석",
+        "📊 입도객 추이",
+        "📜 과거 분석 (Pace)",
+        "🧠 전략 사령부 (BI)",
+        "🏨 시장 최저가 대시보드",       # ← 파일1의 Tab1 이식
+        "💎 엠버 객실 전략",             # ← 파일1의 Tab2 이식
+        "📈 가격 변동 추이 (Time Travel)" # ← 파일1의 Tab3 이식
+    ])
 
     # --- TAB 1: 항공권 ---
     with tab1:
@@ -924,7 +764,7 @@ if check_password():
                     st.plotly_chart(fig_d, use_container_width=True)
         else: st.warning("입도객 데이터가 없습니다.")
 
-# --- TAB 6: Pace Report ---
+    # --- TAB 6: Pace Report ---
     with tab6:
         st.header("📜 과거 성과 분석 & Pace Report")
         with st.spinner("데이터 분석 중..."):
@@ -1269,3 +1109,158 @@ if check_password():
 
         else:
             st.info("💡 좌측 패널에서 온북 엑셀 파일을 업로드하시면 엠버 OTB 및 전체 전략 분석이 활성화됩니다.")
+
+    # =========================================================================
+    # ===== [이식 영역] 원래 '대시보드.py' 파일의 3개 탭 전체 =====
+    # 독립된 load_hotel_comp_data_legacy() 로더를 사용하여 기능 100% 보존
+    # =========================================================================
+    df_legacy = load_hotel_comp_data_legacy()
+
+    # --- TAB 8: [원 대시보드.py] 시장 최저가 대시보드 ---
+    with tab8:
+        st.title("🏨 Jeju Hotel Market Intelligence")
+        st.markdown(f"**엠버퓨어힐 전략 상황실** | *Last Update: {datetime.now().strftime('%Y-%m-%d %H:%M')}*")
+
+        if df_legacy.empty:
+            st.warning("⚠️ 아직 수집된 데이터가 없습니다. 'hotel_spy.py'를 먼저 실행해서 데이터를 모아주세요.")
+        else:
+            # 가장 최근에 조사한 데이터만 필터링 (현재 시장가)
+            latest_search_date = df_legacy["Search_Date"].max()
+            current_market_df = df_legacy[df_legacy["Search_Date"] == latest_search_date].copy()
+
+            # 상단 요약 메트릭
+            st.markdown("---")
+            col1, col2, col3, col4 = st.columns(4)
+            
+            # 엠버 평균 최저가 계산
+            amber_avg = current_market_df[current_market_df["Hotel"]=="Amber_Pure_Hill"]["Min_Price"].mean()
+            parnas_avg = current_market_df[current_market_df["Hotel"]=="Parnas_Jeju"]["Min_Price"].mean()
+            josun_avg = current_market_df[current_market_df["Hotel"]=="Grand_Josun"]["Min_Price"].mean()
+
+            col1.metric("엠버퓨어힐 평균가", f"{int(amber_avg):,}원" if pd.notnull(amber_avg) else "-")
+            col2.metric("파르나스 제주 평균가", f"{int(parnas_avg):,}원" if pd.notnull(parnas_avg) else "-", 
+                        delta=f"{int(amber_avg - parnas_avg):,}원" if pd.notnull(parnas_avg) and pd.notnull(amber_avg) else None, delta_color="inverse")
+            col3.metric("그랜드조선 평균가", f"{int(josun_avg):,}원" if pd.notnull(josun_avg) else "-",
+                        delta=f"{int(amber_avg - josun_avg):,}원" if pd.notnull(josun_avg) and pd.notnull(amber_avg) else None, delta_color="inverse")
+            col4.metric("데이터 기준일", f"{latest_search_date} (Latest)")
+
+            st.markdown("---")
+
+            st.subheader(f"📅 일별 최저가 흐름 (기준: {latest_search_date} 조사)")
+            
+            # 선 그래프 그리기
+            fig_comp = px.line(current_market_df, 
+                               x="CheckIn_Date", 
+                               y="Min_Price", 
+                               color="Hotel",
+                               markers=True,
+                               color_discrete_map={
+                                   "Amber_Pure_Hill": "#FF4B4B",  # 엠버는 강조색(Red)
+                                   "Parnas_Jeju": "#1f77b4",      # 파르나스(Blue)
+                                   "Grand_Josun": "#2ca02c"       # 조선(Green)
+                               },
+                               hover_data={"Min_Price": ":,.0f"})
+            
+            fig_comp.update_layout(height=500, xaxis_title="체크인 날짜", yaxis_title="최저가 (원)")
+            st.plotly_chart(fig_comp, use_container_width=True)
+
+    # --- TAB 9: [원 대시보드.py] 엠버 객실 전략 ---
+    with tab9:
+        st.subheader("💎 엠버퓨어힐 객실 등급별 가격 Gap 분석")
+        
+        if df_legacy.empty:
+            st.warning("⚠️ 아직 수집된 데이터가 없습니다.")
+        else:
+            latest_search_date = df_legacy["Search_Date"].max()
+            current_market_df = df_legacy[df_legacy["Search_Date"] == latest_search_date].copy()
+            amber_data = current_market_df[current_market_df["Hotel"] == "Amber_Pure_Hill"].copy()
+            
+            if amber_data.empty:
+                st.info("엠버퓨어힐 데이터가 없습니다.")
+            else:
+                # 그래프용 데이터 구조 변경 (Melt)
+                # 최저가, 힐엠버트윈, 힐파인더블을 하나의 컬럼으로 합침
+                amber_melted = amber_data.melt(id_vars=["CheckIn_Date"], 
+                                               value_vars=["Min_Price", "Amber_Twin", "Pine_Double"],
+                                               var_name="Room_Type", value_name="Price")
+                
+                # 결측치 제거 (가격 없는 날 제외)
+                amber_melted = amber_melted.dropna(subset=["Price"])
+
+                fig_internal = px.line(amber_melted, 
+                                       x="CheckIn_Date", 
+                                       y="Price", 
+                                       color="Room_Type",
+                                       markers=True,
+                                       line_dash="Room_Type", # 선 스타일 다르게
+                                       title="객실 타입별 가격 차이 (Spread)",
+                                       color_discrete_map={
+                                           "Min_Price": "gray",
+                                           "Amber_Twin": "#FFA15A",
+                                           "Pine_Double": "#EF553B"
+                                       })
+                
+                fig_internal.update_traces(hovertemplate='%{y:,.0f}원')
+                fig_internal.update_layout(height=500, xaxis_title="체크인 날짜", yaxis_title="판매가 (원)")
+                st.plotly_chart(fig_internal, use_container_width=True)
+                
+                # [전략 인사이트] Gap 통계 보여주기
+                st.markdown("#### 💡 Strategy Insight: Price Gap")
+                gap_col1, gap_col2 = st.columns(2)
+                
+                # 평균 Gap 계산
+                amber_data["Gap_Twin"] = amber_data["Amber_Twin"] - amber_data["Min_Price"]
+                amber_data["Gap_Double"] = amber_data["Pine_Double"] - amber_data["Min_Price"]
+                
+                avg_gap_twin = amber_data["Gap_Twin"].mean()
+                avg_gap_double = amber_data["Gap_Double"].mean()
+                
+                gap_col1.info(f"**힐 엠버 트윈 프리미엄:** 평균 +{int(avg_gap_twin):,}원 (vs 최저가)" if pd.notnull(avg_gap_twin) else "**힐 엠버 트윈 프리미엄:** 데이터 없음")
+                gap_col2.success(f"**힐 파인 더블 프리미엄:** 평균 +{int(avg_gap_double):,}원 (vs 최저가)" if pd.notnull(avg_gap_double) else "**힐 파인 더블 프리미엄:** 데이터 없음")
+
+    # --- TAB 10: [원 대시보드.py] 가격 변동 추이 (Time Travel) ---
+    with tab10:
+        st.subheader("📈 특정 날짜의 가격 변동 이력 (언제 가격이 올랐나?)")
+        
+        if df_legacy.empty:
+            st.warning("⚠️ 아직 수집된 데이터가 없습니다.")
+        else:
+            # 사용자가 분석하고 싶은 '체크인 날짜' 선택
+            available_dates = sorted(df_legacy["CheckIn_Date"].unique())
+            selected_date = st.selectbox("체크인 날짜를 선택하세요:", available_dates, format_func=lambda x: pd.to_datetime(x).strftime('%Y-%m-%d'))
+            
+            # 선택한 날짜의 데이터만 필터링
+            history_df = df_legacy[df_legacy["CheckIn_Date"] == selected_date].copy()
+            
+            if history_df.empty:
+                st.write("선택한 날짜의 기록이 없습니다.")
+            else:
+                # x축을 '조사한 날짜(Search_Date)'로 설정하여 시계열 변화 확인
+                fig_history = go.Figure()
+
+                # 1. 엠버 최저가
+                amber_hist = history_df[history_df["Hotel"]=="Amber_Pure_Hill"]
+                fig_history.add_trace(go.Scatter(x=amber_hist["Search_Date_DT"], y=amber_hist["Min_Price"], 
+                                                 mode='lines+markers', name='엠버 최저가', line=dict(color='red')))
+                
+                # 2. 엠버 트윈/더블
+                fig_history.add_trace(go.Scatter(x=amber_hist["Search_Date_DT"], y=amber_hist["Amber_Twin"], 
+                                                 mode='lines+markers', name='힐 엠버 트윈', line=dict(color='orange', dash='dot')))
+                
+                # 3. 파르나스
+                parnas_hist = history_df[history_df["Hotel"]=="Parnas_Jeju"]
+                fig_history.add_trace(go.Scatter(x=parnas_hist["Search_Date_DT"], y=parnas_hist["Min_Price"], 
+                                                 mode='lines+markers', name='파르나스', line=dict(color='blue')))
+                
+                # 4. 조선
+                josun_hist = history_df[history_df["Hotel"]=="Grand_Josun"]
+                fig_history.add_trace(go.Scatter(x=josun_hist["Search_Date_DT"], y=josun_hist["Min_Price"], 
+                                                 mode='lines+markers', name='조선', line=dict(color='green')))
+
+                fig_history.update_layout(title=f"{pd.to_datetime(selected_date).strftime('%Y-%m-%d')} 숙박 요금의 변화 추이",
+                                          xaxis_title="데이터 수집일 (Search Date)",
+                                          yaxis_title="가격 (원)",
+                                          hovermode="x unified")
+                st.plotly_chart(fig_history, use_container_width=True)
+                
+                st.caption("※ X축은 데이터를 수집한 날짜입니다. 그래프가 우상향하면 가격이 오르고 있다는 뜻입니다.")

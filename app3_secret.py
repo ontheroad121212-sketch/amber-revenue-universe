@@ -765,7 +765,7 @@ if avail_files:
     except Exception as e: st.sidebar.error(f"재고 분석 에러: {e}")
 
 # ======================================================================
-# 🚀 [아키텍트 엔진 v6.9] PMS 증분 병합 (Q열 거래처 우선 추출 버전)
+# 🚀 [아키텍트 엔진 v6.9] PMS 증분 병합 (Q열 강제 우선 순위 버전)
 # ======================================================================
 if pms_files:
     try:
@@ -799,9 +799,17 @@ if pms_files:
             c_id = find_column(new_v_df, ['예약번호', 'ConfNo', 'No', '예약번호 '])
             c_bk = find_column(new_v_df, ['예약일자', '예약일'])
             
-            # 💡 [핵심 수정] '거래처'를 가장 먼저 찾도록 순서를 강제 조정합니다. 
-            # '예약경로'보다 '거래처'라는 단어가 보이면 무조건 그걸 잡습니다.
-            c_ch = find_column(new_v_df, ['거래처', '거래처명', '예약처', 'Channel', '예약경로', 'Source'])
+            # 💡 [필살기] find_column에만 맡기지 않고, '거래처'가 제목에 포함된 컬럼을 직접 우선 필터링합니다.
+            # 만약 '거래처'라는 정확한 이름이 있으면 무조건 그 컬럼을 사용합니다.
+            c_ch = None
+            for col_name in new_v_df.columns:
+                if str(col_name).strip() == '거래처':
+                    c_ch = col_name
+                    break
+            
+            # 위에서 못 찾았을 때만 기존의 find_column 로직을 태웁니다.
+            if not c_ch:
+                c_ch = find_column(new_v_df, ['거래처', '거래처명', '예약처', 'Channel'])
 
             new_v_df['Temp_In'] = pd.to_datetime(new_v_df[c_in], errors='coerce')
             new_v_df['Val_Nights'] = pd.to_numeric(new_v_df[c_rn].astype(str).str.extract(r'(\d+)')[0], errors='coerce').fillna(1).astype(int)
@@ -818,7 +826,7 @@ if pms_files:
                 unit_daily_rev = row['Rate_Per_Night'] / row['Val_Rooms'] if row['Val_Rooms'] > 0 else 0
                 res_id = str(row[c_id]).strip() if c_id and pd.notna(row[c_id]) else f"{row[c_tp]}_{row['Rate_Per_Night']}"
                 
-                # 💡 [보정] 거래처 컬럼에서 값을 추출할 때 빈칸이나 에러를 더 꼼꼼히 체크합니다.
+                # 💡 [보정] '거래처' 컬럼(c_ch)에서 데이터를 우선적으로 뽑고, 없으면 U열(예약경로)은 쳐다보지도 않습니다.
                 raw_ch = row.get(c_ch, "기타")
                 ch_name = str(raw_ch).strip() if pd.notna(raw_ch) and str(raw_ch).strip() != "" else "기타 (Unknown)"
                 
@@ -833,7 +841,7 @@ if pms_files:
                             '객실타입': row[c_tp],
                             'Temp_In': row['Temp_In'],
                             'Temp_Bk': row['Temp_Bk'],
-                            'Channel': ch_name,  # 이제 U열 대신 Q열의 '거래처'가 들어갑니다.
+                            'Channel': ch_name, 
                             'Unique_Key': f"{res_id}_{current_date.strftime('%Y%m%d')}_R{r}"
                         })
                 return rows
@@ -849,7 +857,7 @@ if pms_files:
 
             df_full_pms = combined_pms.drop_duplicates(subset=['Unique_Key'], keep='last').reset_index(drop=True)
 
-            st.sidebar.success(f"✅ PMS 증분 업데이트 완료 (거래처 데이터 포함)")
+            st.sidebar.success(f"✅ Q열 '거래처' 데이터로 매핑 완료")
 
     except Exception as e:
         st.sidebar.error(f"PMS 분석 오류: {e}")

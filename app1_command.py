@@ -70,8 +70,10 @@ if "flight_app" not in existing_apps:
 
 try:
     db_hotel = firestore.client(app=firebase_admin.get_app("hotel_app"))
+    db = db_hotel  # 💡 [핵심] 기존 코드들이 'db'를 찾을 수 있게 연결해주는 이 한 줄을 꼭 추가해 주세요!!!
 except:
     db_hotel = None
+    db = None
 
 try:
     db_flight = firestore.client(app=firebase_admin.get_app("flight_app"))

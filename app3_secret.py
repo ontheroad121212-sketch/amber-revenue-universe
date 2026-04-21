@@ -7,16 +7,22 @@ import plotly.graph_objects as go
 from datetime import datetime
 
 # -----------------------------------------------------------------------------
-# 1. 기본 설정 및 파이어베이스 연결
+# 1. 파이어베이스 연결 (통합 포털 호환용)
 # -----------------------------------------------------------------------------
-st.set_page_config(layout="wide", page_title="Jeju Hotel Strategy Dashboard")
+# 페이지 설정(st.set_page_config)은 main.py에서 하므로 삭제했습니다.
 
-# 캐싱을 통해 파이어베이스 연결 속도 최적화
-if not firebase_admin._apps:
-    cred = credentials.Certificate("serviceAccountKey.json") # ⚠️ 키 파일 이름 확인 필수!
-    firebase_admin.initialize_app(cred)
+# 1, 3번 앱에서 이미 연결해둔 DB(flight_app)가 있으면 그대로 빌려 씁니다.
+try:
+    app_flight = firebase_admin.get_app("flight_app")
+except ValueError:
+    # 만약 연결이 안 되어 있다면 여기서 안전하게 연결합니다.
+    if "firebase_flight" in st.secrets:
+        cred = credentials.Certificate(dict(st.secrets["firebase_flight"]))
+    else:
+        cred = credentials.Certificate("serviceAccountKey.json")
+    app_flight = firebase_admin.initialize_app(cred, name="flight_app")
 
-db = firestore.client()
+db = firestore.client(app=app_flight)
 
 # -----------------------------------------------------------------------------
 # 2. 데이터 로드 및 전처리 함수

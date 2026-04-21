@@ -47,34 +47,35 @@ if not check_password():
     st.stop()
 
 # ============================================================
-# 3. Firebase 초기화 (원본 완벽 복구)
+# 3. Firebase 초기화 (메모리 꼬임 강제 리셋 버전)
 # ============================================================
-existing_apps = [a.name for a in firebase_admin._apps.values()] if firebase_admin._apps else []
+import firebase_admin
+from firebase_admin import credentials, firestore
 
-if "hotel_app" not in existing_apps:
-    try:
-        cred_h = credentials.Certificate(dict(st.secrets["firebase"]))
-        firebase_admin.initialize_app(cred_h, name="hotel_app")
-    except Exception as e:
-        st.error(f"호텔 Firebase 연결 실패: {e}")
-        st.stop()
+# ✨ [핵심 해결] 스트림릿 메모리에 꼬여서 남아있는 기존 DB 연결을 강제로 전부 날려버립니다.
+if firebase_admin._apps:
+    for app_name in list(firebase_admin._apps.keys()):
+        firebase_admin.delete_app(firebase_admin.get_app(app_name))
 
-if "flight_app" not in existing_apps:
-    try:
-        cred_f = credentials.Certificate(dict(st.secrets["firebase_flight"]))
-        firebase_admin.initialize_app(cred_f, name="flight_app")
-    except Exception as e:
-        st.warning(f"항공 Firebase 연결 실패: {e}")
-
+# 1) 팀장님이 지정하신 [firebase] (amber-rate) 키로 무조건 새롭게 연결합니다.
 try:
+    cred_h = credentials.Certificate(dict(st.secrets["firebase"]))
+    firebase_admin.initialize_app(cred_h, name="hotel_app")
     db = firestore.client(app=firebase_admin.get_app("hotel_app"))
-except:
-    st.error("호텔 DB 연결 실패")
+except Exception as e:
+    st.error(f"호텔 DB(amber-rate) 연결 실패: {e}")
     st.stop()
 
+# 2) 항공권 DB 연결
 try:
-    db_flight = firestore.client(app=firebase_admin.get_app("flight_app"))
-except:
+    if "firebase_flight" in st.secrets:
+        cred_f = credentials.Certificate(dict(st.secrets["firebase_flight"]))
+        firebase_admin.initialize_app(cred_f, name="flight_app")
+        db_flight = firestore.client(app=firebase_admin.get_app("flight_app"))
+    else:
+        db_flight = None
+except Exception as e:
+    st.warning(f"항공 Firebase 연결 실패: {e}")
     db_flight = None
 
 # ============================================================

@@ -231,38 +231,54 @@ st.title("🚀 2026 비상: 시크릿 전략 페이지")
 st.markdown("---")
 
 # 2️⃣ 여기는 '사이드바' 영역입니다 (왼쪽 메뉴)
-# 💡 [핵심] APP3(또는 메모리)에 이미 저장된 데이터가 있는지 확인 (키 이름을 'otb_data'로 통일)
-shared_data = st.session_state.get('otb_data', pd.DataFrame())
+with st.sidebar:
+    st.header("📂 데이터 사령부")
 
-if not shared_data.empty:
-    # APP3에서 올린 데이터가 이미 있다면 업로드 창을 숨기고 연동 완료 메시지 출력!
-    st.success("🔗 APP3(전략 사령부)의 데이터를 자동으로 연동했습니다!")
-    st.info(f"✅ 총 {len(shared_data):,}일치 데이터 로드 됨")
-    
-    # 그래도 수동으로 파일을 올리고 싶을 때를 대비한 숨김 창
-    with st.expander("🔄 파일 수동 덮어쓰기"):
-        uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
+    # [1] 데이터 저장소 초기화
+    if 'otb_data' not in st.session_state:
+        st.session_state['otb_data'] = pd.DataFrame()
+
+    # [2] 🔥 클라우드 자동 동기화 로직 (APP3에서 올린 최신 데이터 연동)
+    if st.session_state['otb_data'].empty and db_flight:
+        try:
+            latest_docs = db_flight.collection("amber_snapshots").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(1).get()
+            if latest_docs:
+                d = latest_docs[0].to_dict()
+                pms_raw = d.get('pms_data')
+                if pms_raw:
+                    import io
+                    st.session_state['otb_data'] = pd.read_json(io.StringIO(pms_raw), orient='split')
+                    st.success(f"☁️ 클라우드 최신 데이터 동기화 완료\n({d.get('save_name')})")
+        except Exception as e:
+            st.warning(f"자동 동기화 중 오류(무시 가능): {e}")
+
+    # [3] 화면 표시 및 수동 업로드 기능
+    if not st.session_state['otb_data'].empty:
+        st.success("🔗 APP3(전략 사령부)의 데이터를 자동으로 연동했습니다!")
+        st.info(f"✅ 총 {len(st.session_state['otb_data']):,}일치 데이터 로드 됨")
+        
+        with st.expander("🔄 데이터 수동 덮어쓰기 (파일 업로드)"):
+            uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True, key="manual_up")
+            if uploaded_files:
+                parsed_df = parse_uploaded_files(uploaded_files)
+                if not parsed_df.empty:
+                    st.session_state['otb_data'] = parsed_df
+                    st.success("✅ 파일 데이터로 교체 완료!")
+                    st.rerun()
+    else:
+        uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True, key="first_up")
         if uploaded_files:
             parsed_df = parse_uploaded_files(uploaded_files)
             if not parsed_df.empty:
                 st.session_state['otb_data'] = parsed_df
-                st.success("✅ 새 데이터로 덮어쓰기 완료! 새로고침을 눌러주세요.")
-else:
-    # 연동된 데이터가 없을 때는 평소처럼 업로드 창 표시
-    uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
-    if uploaded_files:
-        parsed_df = parse_uploaded_files(uploaded_files)
-        if not parsed_df.empty:
-            st.session_state['otb_data'] = parsed_df  # 열쇠 이름을 'otb_data'로 완벽 통일
-            st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
-    
+                st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
+                st.rerun()
+
     st.markdown("---")
-    
-    if st.button("🔄 새로고침"):
+    if st.button("🔄 시스템 전체 새로고침", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
-    # 💡 [수정됨] 여기서부터 들여쓰기를 앞으로 당겨서 버튼 밖으로 꺼냈습니다!
     # -----------------------------------------------------------------
     # 글로벌 데이터 타임머신 (모든 탭 동기화)
     # -----------------------------------------------------------------
@@ -278,8 +294,8 @@ else:
     if not df_f_side.empty: all_dates.update(df_f_side['search_date_str'].dropna().unique())
     if not df_c_side.empty: all_dates.update(df_c_side['search_date_str'].dropna().unique())
     if not df_r_side.empty: all_dates.update(df_r_side['search_date_str'].dropna().unique())
-
-    all_search_dates = sorted([d for d in all_dates if d != 'unknown' and d != ''], reverse=True)
+    
+    all_search_dates = sorted([d for d in all_dates if d not in ['unknown', '']], reverse=True)
 
     if all_search_dates:
         selected_global_date = st.selectbox("조회할 크롤링 수집일 선택", all_search_dates, index=0)
@@ -292,7 +308,7 @@ else:
 
     # 날씨 API
     api_key = st.secrets.get("data_portal_key", None)
-    col_w1, col_w2 = st.columns([1, 3])
+    col_w1, col_w2 = st.columns([1, 2])
     with col_w1: st.subheader("🌤️ 제주 날씨")
     with col_w2:
         if api_key:
@@ -314,33 +330,54 @@ else:
                     m3.metric("습도", f"{w_data.get('REH', '-')}%")
             except: st.caption("날씨 정보 수신 대기중...")
         else: st.caption("API Key 설정 필요")
-    
+
     st.markdown("---")
 
-    # 스냅샷 전략 타임머신 (전략 사령부 탭 전용)
-    st.markdown("### 🕰️ 전략 타임머신")
-    snapshot_options = ["현재 (Real-time)"]
+    # 🕰️ 전략 스냅샷 복원 (전략 사령부 탭 전용)
+    st.markdown("### 🏛️ 전략 스냅샷 복원")
+    snapshot_options = ["선택 안 함"]
+    snap_map = {}
     
     if db_flight:
         try:
-            docs = db_flight.collection('strategy_history').stream()
-            saved_dates = sorted([doc.id for doc in docs], reverse=True)
-            snapshot_options.extend(saved_dates)
+            docs = db_flight.collection('amber_snapshots').order_by('timestamp', direction=firestore.Query.DESCENDING).limit(20).stream()
+            snap_map = {doc.id: doc.to_dict().get('save_name', doc.id) for doc in docs}
+            snapshot_options.extend(list(snap_map.keys()))
         except: pass
     
-    selected_snapshot = st.selectbox(
-        "과거 시점 데이터 불러오기", 
-        snapshot_options,
-        index=0,
-        help="선택하면 [전략 사령부] 탭의 전체 대시보드가 해당 시점으로 복구됩니다."
-    )
-    st.session_state['selected_snapshot_id'] = selected_snapshot
+    selected_snap_id = st.selectbox("불러올 스냅샷 시점", snapshot_options, format_func=lambda x: snap_map.get(x, x))
+    
+    if selected_snap_id != "선택 안 함":
+        if st.button("📥 해당 시점으로 OTB 복원", use_container_width=True):
+            try:
+                target_doc = db_flight.collection('amber_snapshots').document(selected_snap_id).get()
+                if target_doc.exists:
+                    d = target_doc.to_dict()
+                    pms_raw = d.get('pms_data')
+                    if pms_raw:
+                        import io
+                        st.session_state['otb_data'] = pd.read_json(io.StringIO(pms_raw), orient='split')
+                        st.success(f"✅ {snap_map[selected_snap_id]} 복원 완료!")
+                        st.rerun()
+            except Exception as e:
+                st.error(f"복원 실패: {e}")
 
 # 💡 [수정됨] 여기서부터 들여쓰기를 맨 앞으로 당겨서 사이드바 밖(중앙 메인 화면)으로 꺼냈습니다!
 # =========================================================================
 # 5. 탭 구성 (UI) - 파일1 탭 3개 + 파일2 탭 7개 = 총 10개 탭
 # =========================================================================
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
+    "✈️ 항공권 (수요)",
+    "🏨 엠버 예약(분석)",
+    "⚔️ 경쟁사 비교",
+    "🚗 렌터카 분석",
+    "📊 입도객 추이",
+    "📜 과거 분석 (Pace)",
+    "🧠 전략 사령부 (BI)",
+    "🏨 시장 최저가 대시보드",
+    "💎 엠버 객실 전략",
+    "📈 가격 변동 추이 (Time Travel)"
+])
     "✈️ 항공권 (수요)",
     "🏨 엠버 예약(분석)",
     "⚔️ 경쟁사 비교",

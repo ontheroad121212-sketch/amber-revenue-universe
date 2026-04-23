@@ -544,48 +544,24 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-   # 사이드바 하단에 추가
+    # 사이드바 맨 아래 추가
     st.markdown("---")
-    st.markdown("### 🚨 DB 관리 (데이터 무결성)")
-    if st.button("🗑️ [안전] 오염된 데이터만 골라내서 삭제", type="primary", use_container_width=True):
-        if not db_hotel:
-            st.error("DB 연결 안 됨")
-        else:
-            with st.spinner("비정상적인 쓰레기 데이터(RN 100 이상)만 찾아내서 소각 중입니다..."):
-                try:
-                    docs = db_hotel.collection('hotel_bookings').stream()
-                    batch = db_hotel.batch()
-                    delete_count = 0
-                    
-                    for doc in docs:
-                        data = doc.to_dict()
-                        
-                        # 1. 데이터 밀림 판별: 박수나 객실수가 100 이상인 기형적인 데이터 찾기
-                        rn = pd.to_numeric(data.get('박수', 0), errors='coerce')
-                        rooms = pd.to_numeric(data.get('객실수', 0), errors='coerce')
-                        
-                        # 만약 숫자가 아니거나(NaN), 100 이상으로 뻥튀기 되었다면 오염된 데이터로 간주!
-                        if pd.isna(rn) or rn > 100 or pd.isna(rooms) or rooms > 100:
-                            batch.delete(doc.reference)
-                            delete_count += 1
-                            
-                            # 파이어베이스는 한 번에 500개씩만 지울 수 있으므로 400개마다 끊어서 처리
-                            if delete_count % 400 == 0:
-                                batch.commit()
-                                batch = db_hotel.batch()
-                                
-                    batch.commit()
-                    
-                    if delete_count > 0:
-                        st.success(f"✅ 찾아냈습니다! 총 {delete_count}개의 오염된 데이터를 영구 삭제했습니다.")
-                    else:
-                        st.info("✨ 오염된 데이터가 발견되지 않았습니다. 모두 정상입니다.")
-                        
-                    st.cache_data.clear()
-                    
-                except Exception as e:
-                    st.error(f"삭제 실패: {e}")
-
+    st.markdown("### 🧹 DB 무결성 관리")
+    if st.button("🗑️ 오염된 예약 데이터(RN 100이상) 정밀 삭제", type="primary"):
+        with st.spinner("오염된 데이터를 소각 중..."):
+            docs = db_hotel.collection('hotel_bookings').stream()
+            batch = db_hotel.batch()
+            count = 0
+            for doc in docs:
+                d = doc.to_dict()
+                # 💡 박수가 100 이상이거나 총금액이 0인 쓰레기 데이터만 삭제
+                if pd.to_numeric(d.get('박수', 0), errors='coerce') > 100:
+                    batch.delete(doc.reference)
+                    count += 1
+            batch.commit()
+            st.success(f"✅ {count}개의 오염된 데이터를 영구 삭제했습니다. 이제 깨끗합니다!")
+            st.cache_data.clear()
+            st.rerun()
     # -------------------------------------------------------------------------
     # 글로벌 데이터 타임머신
     # -------------------------------------------------------------------------

@@ -301,64 +301,40 @@ def get_db_bookings_only():
     try:
         if not db_hotel: return pd.DataFrame()
         
-        all_records = []
+        # 💡 [핵심 복구] 중복 데이터가 쌓이는 history 폴더를 버리고, 
+        # 사이드바에서 덮어쓰기로 저장되는 깔끔한 'hotel_bookings'만 봅니다.
+        docs = db_hotel.collection('hotel_bookings').stream()
+        data = [d.to_dict() for d in docs]
+        df = pd.DataFrame(data)
         
-        # 1️⃣ [메인 타겟] revenue_integrity_history 컬렉션 뒤지기
-        # 팀장님 스크린샷에서 보인 2025-10-13... 같은 문서들을 다 엽니다.
-        docs_hist = db_hotel.collection('revenue_integrity_history').stream()
-        for doc in docs_hist:
-            d = doc.to_dict()
-            
-            # 문서 자체가 리스트인 경우 (예: [{}, {}, ...])
-            if isinstance(d, list):
-                all_records.extend(d)
-            # 문서 안에 'data' 같은 키에 리스트가 들어있는 경우
-            elif isinstance(d, dict):
-                list_found = False
-                for v in d.values():
-                    if isinstance(v, list):
-                        all_records.extend(v)
-                        list_found = True
-                # 리스트가 아니라 그냥 문서 자체가 하나의 데이터인 경우
-                if not list_found:
-                    all_records.append(d)
+        if df.empty:
+            return df
 
-        # 2️⃣ [서브 타겟] hotel_bookings 컬렉션도 혹시 모르니 다 가져오기
-        docs_book = db_hotel.collection('hotel_bookings').stream()
-        for doc in docs_book:
-            all_records.append(doc.to_dict())
-
-        if not all_records:
-            return pd.DataFrame()
-
-        # 데이터프레임 생성
-        df = pd.DataFrame(all_records)
-        
-        # 💡 [핵심] 컬럼명 표준화 (팀장님 DB의 실제 필드명에 맞춰 변환)
-        # 입실일자나 접수일자 등이 들어있는 컬럼을 찾아서 통일합니다.
+        # 💡 컬럼명 표준화 (사이드바에서 저장된 'date'를 탭들이 좋아하는 '입실일자'로 번역)
         rename_map = {
-            'Stay_Date': '입실일자', 'checkin_date': '입실일자', 'date': '입실일자',
-            'Daily_Rev': '총금액_숫자', 'revenue': '총금액_숫자', 'otb_revenue': '총금액_숫자',
-            'Daily_RN': '박수', 'rooms_sold': '박수'
+            'date': '입실일자', 'checkin_date': '입실일자', 'Stay_Date': '입실일자',
+            'otb_revenue': '총금액_숫자', 'Daily_Rev': '총금액_숫자', 'revenue': '총금액_숫자',
+            'rooms_sold': '박수', 'Daily_RN': '박수', 'nights': '박수'
         }
         for old, new in rename_map.items():
             if old in df.columns and new not in df.columns:
                 df = df.rename(columns={old: new})
 
-        # 날짜 타입 변환 (errors='coerce'로 잘못된 날짜는 무시)
+        # 날짜 및 금액 포맷 안전 변환
         for col in ['입실일자', '접수일자', '예약일자', '퇴실일자']:
             if col in df.columns:
                 df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
         
-        # 금액 타입 변환
-        target_rev_col = '총금액_숫자' if '총금액_숫자' in df.columns else ('총금액' if '총금액' in df.columns else None)
-        if target_rev_col:
-            df['총금액_숫자'] = pd.to_numeric(df[target_rev_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        if '총금액' in df.columns:
+            df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        elif '총금액_숫자' in df.columns:
+            df['총금액_숫자'] = pd.to_numeric(df['총금액_숫자'], errors='coerce').fillna(0)
             
         return df
     except Exception as e:
-        st.error(f"❌ 데이터 로드 중 치명적 오류: {e}")
+        st.error(f"데이터 로드 중 오류: {e}")
         return pd.DataFrame()
+       
 def save_otb_to_firebase(df):
     """
     온북 DF를 db_hotel의 hotel_bookings 컬렉션에 저장.

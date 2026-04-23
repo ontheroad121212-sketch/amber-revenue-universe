@@ -286,59 +286,22 @@ def get_tourist_data_only():
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
     try:
-        if not db_hotel: 
-            st.error("🚨 db_hotel 연결 안 됨")
-            return pd.DataFrame()
-            
-        all_records = []
-        
-        # 💡 1. 팀장님이 지목한 'revenue_integrity_history' 우선 스캔!
-        docs_history = db_hotel.collection('revenue_integrity_history').stream()
-        for doc in docs_history:
-            d = doc.to_dict()
-            # 문서 안에 'data'나 'reservations' 같은 이름의 리스트로 묶여 있을 경우 쫙 풀어줌
-            found_list = False
-            for key, value in d.items():
-                if isinstance(value, list):
-                    all_records.extend(value)
-                    found_list = True
-            
-            # 리스트가 아니라 문서 자체가 하나의 예약건일 경우
-            if not found_list:
-                all_records.append(d)
-
-        # 💡 2. 만약 거기가 비어있다면 원래의 'hotel_bookings'도 스캔!
-        if not all_records:
-            docs_bookings = db_hotel.collection('hotel_bookings').stream()
-            for doc in docs_bookings:
-                all_records.append(doc.to_dict())
-
-        # 최종 확인
-        if not all_records:
-            st.error("🚨 두 컬렉션을 다 뒤졌지만 분석할 데이터가 없습니다.")
+        if not app_hotel or not db_hotel:
+            st.error("🚨 DB 연결 자체가 실패했습니다. secrets.toml을 확인하세요.")
             return pd.DataFrame()
 
-        df = pd.DataFrame(all_records)
-        st.success(f"🎯 빙고! 클라우드에서 총 {len(df):,}건의 데이터를 해독했습니다!")
-
-        # 💡 3. 호환성 브릿지 (이름표 자동 번역)
-        if 'date' in df.columns and '입실일자' not in df.columns: df['입실일자'] = df['date']
-        if 'otb_revenue' in df.columns and '총금액' not in df.columns and '총금액_숫자' not in df.columns: df['총금액_숫자'] = df['otb_revenue']
-        if 'rooms_sold' in df.columns and '박수' not in df.columns: df['박수'] = df['rooms_sold']
-
-        for col in ['입실일자', '접수일자', '예약일자']:
-            if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
+        # 1. 현재 접속한 프로젝트 ID 출력
+        proj_id = app_hotel.project_id
+        st.error(f"🔑 **[접속 추적]** 현재 앱이 문을 연 파이어베이스 프로젝트: **{proj_id}**")
         
-        if '총금액' in df.columns: 
-            df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-        elif '총금액_숫자' in df.columns:
-            df['총금액_숫자'] = pd.to_numeric(df['총금액_숫자'], errors='coerce').fillna(0)
-            
-        return df
+        # 2. 그 프로젝트 안에 있는 폴더(컬렉션) 목록 전부 출력
+        cols = [c.id for c in db_hotel.collections()]
+        st.warning(f"📁 **[폴더 스캔]** 이 프로젝트 안에 실제로 있는 폴더들: {cols}")
+        
     except Exception as e:
-        st.error(f"데이터 해독 중 에러 발생: {e}")
-        return pd.DataFrame()
+        st.error(f"스캔 중 에러 발생: {e}")
+        
+    return pd.DataFrame()
 
 
 def save_otb_to_firebase(df):

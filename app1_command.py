@@ -1941,6 +1941,54 @@ with st.sidebar:
 # ============================================================
 # 메인 영역
 # ============================================================
+st.markdown("---")
+st.markdown("## 🎯 Today's Action Board (오늘의 최우선 조치사항)")
+st.caption("시스템이 분석한 수익 누수 및 점유율 위험 날짜 중, 오늘 즉시 개입해야 할 TOP 5입니다.")
+
+# 1. 기회비용(Dynamic) 누수 TOP 3 + 2. Fixed 긴급 인상 TOP 2 조합
+action_cards = []
+
+# Dynamic 누수 
+if not alert_opp_df.empty:
+    future_opp = alert_opp_df[(alert_opp_df['BAR상승'] > 0) & (alert_opp_df['날짜'] >= TODAY)]
+    top_opp = future_opp.nlargest(3, '기회비용')
+    for _, row in top_opp.iterrows():
+        action_cards.append({
+            'type': '🩸 단가 상향(수익누수)', 
+            'date': row['날짜'], 
+            'msg': f"{row['객실타입']} BAR +{row['BAR상승']}단계 상향 필요 (기회비용: {int(row['기회비용']):,}원)",
+            'color': '#FF5252'
+        })
+
+# Fixed 긴급 인상
+fixed_alerts_future, _ = get_fixed_room_alerts(curr, all_events)
+if fixed_alerts_future:
+    critical_fixed = [a for a in fixed_alerts_future if a['level'] == 'critical'][:2]
+    for a in critical_fixed:
+        action_cards.append({
+            'type': '🚨 Fixed 긴급 인상', 
+            'date': a['날짜'], 
+            'msg': f"전체 점유율 {a['전체점유율']}% 도달. Fixed 객실 수기 인상 요망!",
+            'color': '#9C27B0'
+        })
+
+# 카드 렌더링
+if action_cards:
+    cols = st.columns(len(action_cards))
+    for i, card in enumerate(action_cards):
+        with cols[i]:
+            d_day = (card['date'] - TODAY).days
+            st.markdown(f"""
+            <div style='background:white; border-top:5px solid {card['color']}; padding:15px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1); height:160px;'>
+                <div style='color:{card['color']}; font-size:12px; font-weight:bold;'>{card['type']} (D-{d_day})</div>
+                <div style='font-size:16px; font-weight:bold; margin:5px 0;'>{card['date'].strftime('%m/%d')} ({WEEKDAYS_KR[card['date'].weekday()]})</div>
+                <div style='font-size:12px; color:#555;'>{card['msg']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+else:
+    st.success("🎉 오늘 즉시 조치할 긴급 알림이 없습니다. 완벽하게 관리되고 있습니다!")
+st.markdown("---")
+
 if not st.session_state.cmd_today_df.empty:
     curr = st.session_state.cmd_today_df
     prev = st.session_state.cmd_prev_df

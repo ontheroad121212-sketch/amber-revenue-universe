@@ -286,19 +286,24 @@ def get_tourist_data_only():
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
     """
-    온북 데이터를 hotel_bookings 컬렉션에서 불러옴.
-    이전 버전과의 호환을 위해 '입실일자', '총금액_숫자' 컬럼도 살려둠.
+    사진에 있는 hotel_bookings (개별 예약 원본 데이터) 컬렉션에서 직접 데이터를 가져옵니다.
     """
     try:
         if not db_hotel: return pd.DataFrame()
         docs = db_hotel.collection('hotel_bookings').stream()
         data = [d.to_dict() for d in docs]
         df = pd.DataFrame(data)
-        if df.empty:
-            return df
-
-        # 컬럼 표준화 (양방향 매핑)
-        df = normalize_otb_columns(df)
+        
+        if not df.empty:
+            # 원본 컬럼명 훼손 없이 날짜 타입만 안전하게 변환
+            if '입실일자' in df.columns: 
+                df['입실일자'] = pd.to_datetime(df['입실일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if '접수일자' in df.columns: 
+                df['접수일자'] = pd.to_datetime(df['접수일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if '예약일자' in df.columns: 
+                df['예약일자'] = pd.to_datetime(df['예약일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            if '총금액' in df.columns: 
+                df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
         return df
     except:
         return pd.DataFrame()
@@ -580,18 +585,14 @@ with tab1:
 # =============================================================================
 with tab2:
     st.header("🏨 엠버퓨어힐 OTB 심화 분석 (Deep Dive)")
-    st.caption("온북 데이터를 기반으로 기간별 예약 속도/퀄리티 분석")
+    st.caption("실시간 원본 예약 DB(hotel_bookings)를 연동하여 예약 속도(Pace)와 퀄리티를 입체적으로 분석합니다.")
 
-    # 세션 우선, 없으면 DB
-    df_h_raw = st.session_state.get('otb_data', pd.DataFrame())
-    if df_h_raw.empty:
-        with st.spinner("호텔 DB에서 로드 중..."):
-            df_h_raw = get_db_bookings_only()
+    # 💡 세션(요약파일) 무시! 무조건 호텔 원본 DB에서 직접 로드
+    with st.spinner("호텔 원본 DB에서 개별 예약 데이터를 로드 중입니다..."):
+        df_h_raw = get_db_bookings_only()
 
     if not df_h_raw.empty:
-        # ⭐ 브릿지 통과
-        df_h_raw = normalize_otb_columns(df_h_raw)
-
+        # 시간대(timezone) 충돌 방지를 위해 utc=True 제거, normalize 추가
         def safe_to_datetime(series):
             return pd.to_datetime(series, errors='coerce').dt.tz_localize(None).dt.normalize()
 
@@ -611,26 +612,15 @@ with tab2:
             df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액'], errors='coerce').fillna(0)
         elif '총금액_숫자' in df_h_raw.columns:
             df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액_숫자'], errors='coerce').fillna(0)
-        elif 'otb_revenue' in df_h_raw.columns:
-            df_h_raw['revenue'] = pd.to_numeric(df_h_raw['otb_revenue'], errors='coerce').fillna(0)
         else:
             df_h_raw['revenue'] = 0
 
-        # lead_time / los 계산
-        mask_valid = df_h_raw['booking_date'].notnull() & df_h_raw['checkin_date'].notnull()
-        if mask_valid.any():
-            df_h_raw.loc[mask_valid, 'lead_time'] = (df_h_raw.loc[mask_valid, 'checkin_date'] - df_h_raw.loc[mask_valid, 'booking_date']).dt.days
-        df_h_raw['lead_time'] = df_h_raw.get('lead_time', 0)
-        if 'lead_time' in df_h_raw.columns:
-            df_h_raw['lead_time'] = df_h_raw['lead_time'].fillna(0)
+        # 💡 [KeyError 해결] 마스크 조건문 삭제! 무조건 컬럼을 생성하고 빈칸을 0으로 채움
+        df_h_raw['lead_time'] = (df_h_raw['checkin_date'] - df_h_raw['booking_date']).dt.days
+        df_h_raw['lead_time'] = df_h_raw['lead_time'].fillna(0)
 
-        mask_los = df_h_raw['checkin_date'].notnull() & df_h_raw['checkout_date'].notnull()
-        if mask_los.any():
-            df_h_raw.loc[mask_los, 'los'] = (df_h_raw.loc[mask_los, 'checkout_date'] - df_h_raw.loc[mask_los, 'checkin_date']).dt.days
-        if 'los' in df_h_raw.columns:
-            df_h_raw['los'] = df_h_raw['los'].fillna(1)
-        else:
-            df_h_raw['los'] = 1
+        df_h_raw['los'] = (df_h_raw['checkout_date'] - df_h_raw['checkin_date']).dt.days
+        df_h_raw['los'] = df_h_raw['los'].fillna(1)
 
         df_h_raw['checkin_month'] = df_h_raw['checkin_date'].dt.strftime('%Y-%m')
         df_h_raw['checkin_day'] = df_h_raw['checkin_date'].dt.day_name()
@@ -662,12 +652,13 @@ with tab2:
         else:
             s_date = e_date = sel_dates
 
-        # 판다스 Timestamp로 포맷을 완벽히 일치시켜 NaT 에러 방지
+        # 💡 [TypeError 해결] dt.date 대신 판다스 Timestamp로 감싸서 완벽하게 비교
         s_ts = pd.Timestamp(s_date)
         e_ts = pd.Timestamp(e_date)
 
         mask_period = (df_h_raw['checkin_date'] >= s_ts) & (df_h_raw['checkin_date'] <= e_ts)
         df_h = df_h_raw[mask_period].copy()
+        
         st.info(f"기간 (**{s_date} ~ {e_date}**) 예약 데이터 **{len(df_h):,}건** 분석")
         st.markdown("---")
 
@@ -675,7 +666,7 @@ with tab2:
             total_rev = df_h['revenue'].sum()
             total_bk = len(df_h)
             adr = total_rev / total_bk if total_bk > 0 else 0
-            avg_lead = df_h['lead_time'].mean() if 'lead_time' in df_h.columns else 0
+            avg_lead = df_h['lead_time'].mean()
 
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("기간 총 매출", f"{int(total_rev):,}원")
@@ -687,6 +678,7 @@ with tab2:
             st.subheader("📈 Booking Pace")
             target_months = df_h['checkin_month'].unique()
             df_pace_chart = df_h[df_h['checkin_month'].isin(target_months)].copy()
+            
             if not df_pace_chart.empty and 'lead_time' in df_pace_chart.columns:
                 df_pace_chart['booking_order'] = df_pace_chart['lead_time'] * -1
                 pace_data = df_pace_chart.groupby(['checkin_month', 'booking_order'])['revenue'].sum().reset_index()
@@ -721,7 +713,7 @@ with tab2:
                     fig_ch = px.treemap(ch_stats, path=['channel_sim'], values='rev', color='adr', color_continuous_scale='RdBu')
                     st.plotly_chart(fig_ch, use_container_width=True)
                 else:
-                    st.info("요약 온북엔 거래처 정보 없음. PMS 원본 사용 시 표시.")
+                    st.info("DB에 거래처 정보가 없습니다.")
 
             st.markdown("---")
             st.subheader("📅 요일별/월별 예약 집중도")
@@ -733,7 +725,7 @@ with tab2:
                                                 color_continuous_scale='Greens')
                 st.plotly_chart(fig_heat, use_container_width=True)
     else:
-        st.warning("분석할 예약 데이터가 없습니다. 사이드바에서 파일 업로드 또는 클라우드에서 로드하세요.")
+        st.warning("호텔 DB에 분석할 예약 데이터가 없습니다.")
 
 
 # =============================================================================
@@ -967,16 +959,13 @@ with tab5:
 # =============================================================================
 with tab6:
     st.header("📜 과거 성과 분석 & Pace Report")
-    with st.spinner("데이터 분석 중..."):
-        df_pace = st.session_state.get('otb_data', pd.DataFrame())
-        if df_pace.empty:
-            df_pace = get_db_bookings_only()
+    
+    # 💡 세션 무시하고 바로 DB 호출
+    with st.spinner("호텔 원본 DB에서 데이터를 로드 중입니다..."):
+        df_pace = get_db_bookings_only()
         df_t = get_tourist_data_only()
 
     st.subheader("1. 과거 성과 복기 (Revenue vs Tourist)")
-
-    if not df_pace.empty:
-        df_pace = normalize_otb_columns(df_pace)
 
     if not df_pace.empty and not df_t.empty and '입실일자' in df_pace.columns:
         df_rev_daily = df_pace.groupby('입실일자')['총금액_숫자'].sum().reset_index(name='daily_rev')
@@ -1006,6 +995,7 @@ with tab6:
 
         df_ty = df_pace[df_pace['year']==this_y].groupby('mmdd')['총금액_숫자'].sum().reset_index()
         df_ly = df_pace[df_pace['year']==last_y].groupby('mmdd')['총금액_숫자'].sum().reset_index()
+        
         df_ty['cumsum'] = df_ty['총금액_숫자'].cumsum()
         df_ly['cumsum'] = df_ly['총금액_숫자'].cumsum()
 
@@ -1021,7 +1011,6 @@ with tab6:
         st.plotly_chart(fig_pc, use_container_width=True)
     else:
         st.warning("Pace Report 데이터 부족")
-
 
 # =============================================================================
 # TAB 7: 전략 사령부

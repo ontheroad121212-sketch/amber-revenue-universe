@@ -285,54 +285,59 @@ def get_tourist_data_only():
 
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
-    # 💡 [DB 스캐너] 3개의 파이어베이스 프로젝트를 모두 뒤집니다!
-    locations = {
-        "1. 호텔 DB (amber-otb-pickup)": db_hotel,
-        "2. 항공 DB (viva2026)": db_flight,
-        "3. 요금 DB (amber-rate)": db_rate
-    }
-    
-    found_db = None
-    
-    for db_name, db_client in locations.items():
-        if db_client:
-            try:
-                # 각 DB마다 hotel_bookings 컬렉션에 데이터가 1개라도 있는지 찔러봄
-                docs = list(db_client.collection('hotel_bookings').limit(1).stream())
-                if len(docs) > 0:
-                    st.success(f"🎯 빙고! 찾았습니다! 팀장님의 진짜 예약 데이터는 **{db_name}** 에 숨어있었습니다!")
-                    found_db = db_client
-                    break
-            except: pass
-            
-    if not found_db:
-        st.error("🚨 3개 DB를 다 뒤졌는데 'hotel_bookings' 데이터가 0개입니다. (스크린샷의 프로젝트 ID가 아예 다른 곳일 수 있습니다!)")
-        return pd.DataFrame()
-        
-    # 진짜 데이터가 있는 곳에서 풀스캔 시작
     try:
-        docs = found_db.collection('hotel_bookings').stream()
-        data = [d.to_dict() for d in docs]
-        df = pd.DataFrame(data)
-        
-        if not df.empty:
-            # 💡 호환성 브릿지 (이름표 자동 번역)
-            if 'date' in df.columns and '입실일자' not in df.columns: df['입실일자'] = df['date']
-            if 'otb_revenue' in df.columns and '총금액' not in df.columns and '총금액_숫자' not in df.columns: df['총금액_숫자'] = df['otb_revenue']
-            if 'rooms_sold' in df.columns and '박수' not in df.columns: df['박수'] = df['rooms_sold']
-
-            for col in ['입실일자', '접수일자', '예약일자']:
-                if col in df.columns:
-                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
+        if not db_hotel: 
+            st.error("🚨 db_hotel 연결 안 됨")
+            return pd.DataFrame()
             
-            if '총금액' in df.columns: 
-                df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '총금액_숫자' in df.columns:
-                df['총금액_숫자'] = pd.to_numeric(df['총금액_숫자'], errors='coerce').fillna(0)
-                
+        all_records = []
+        
+        # 💡 1. 팀장님이 지목한 'revenue_integrity_history' 우선 스캔!
+        docs_history = db_hotel.collection('revenue_integrity_history').stream()
+        for doc in docs_history:
+            d = doc.to_dict()
+            # 문서 안에 'data'나 'reservations' 같은 이름의 리스트로 묶여 있을 경우 쫙 풀어줌
+            found_list = False
+            for key, value in d.items():
+                if isinstance(value, list):
+                    all_records.extend(value)
+                    found_list = True
+            
+            # 리스트가 아니라 문서 자체가 하나의 예약건일 경우
+            if not found_list:
+                all_records.append(d)
+
+        # 💡 2. 만약 거기가 비어있다면 원래의 'hotel_bookings'도 스캔!
+        if not all_records:
+            docs_bookings = db_hotel.collection('hotel_bookings').stream()
+            for doc in docs_bookings:
+                all_records.append(doc.to_dict())
+
+        # 최종 확인
+        if not all_records:
+            st.error("🚨 두 컬렉션을 다 뒤졌지만 분석할 데이터가 없습니다.")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(all_records)
+        st.success(f"🎯 빙고! 클라우드에서 총 {len(df):,}건의 데이터를 해독했습니다!")
+
+        # 💡 3. 호환성 브릿지 (이름표 자동 번역)
+        if 'date' in df.columns and '입실일자' not in df.columns: df['입실일자'] = df['date']
+        if 'otb_revenue' in df.columns and '총금액' not in df.columns and '총금액_숫자' not in df.columns: df['총금액_숫자'] = df['otb_revenue']
+        if 'rooms_sold' in df.columns and '박수' not in df.columns: df['박수'] = df['rooms_sold']
+
+        for col in ['입실일자', '접수일자', '예약일자']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
+        
+        if '총금액' in df.columns: 
+            df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+        elif '총금액_숫자' in df.columns:
+            df['총금액_숫자'] = pd.to_numeric(df['총금액_숫자'], errors='coerce').fillna(0)
+            
         return df
     except Exception as e:
-        st.error(f"데이터 추출 중 에러: {e}")
+        st.error(f"데이터 해독 중 에러 발생: {e}")
         return pd.DataFrame()
 
 

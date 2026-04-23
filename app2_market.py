@@ -828,14 +828,14 @@ with tab2:
             s_date = e_date = sel_dates
 
         # ==============================================================
-        # 💡 [에러 해결 부분] Python date를 Pandas Timestamp로 강제 변환 후 안전하게 비교!
+        # 💡 [시간대 충돌 완벽 해결] 양쪽 모두 시간대 꼬리표를 떼고 순수 날짜로 통일!
         # ==============================================================
         s_ts = pd.to_datetime(s_date)
         e_ts = pd.to_datetime(e_date)
 
-        # .dt.date 를 빼버리고, 무조건 datetime 형식으로 강제 통일하여 비교합니다.
-        checkin_series = pd.to_datetime(df_h_raw['checkin_date'], errors='coerce').dt.normalize()
-        
+        # utc=True로 변환 후, dt.tz_localize(None)으로 시간대 꼬리표를 강제로 찢어버립니다.
+        checkin_series = pd.to_datetime(df_h_raw['checkin_date'], errors='coerce', utc=True).dt.tz_localize(None).dt.normalize()
+
         mask_period = (checkin_series >= s_ts) & (checkin_series <= e_ts)
         df_h = df_h_raw[mask_period].copy()
         

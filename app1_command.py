@@ -2050,6 +2050,7 @@ if not st.session_state.cmd_today_df.empty:
     else:
         st.success("🎉 오늘 즉시 조치할 긴급 알림이 없습니다. 완벽하게 관리되고 있습니다!")
     st.markdown("---")
+            
     # 🏨 Fixed 수기 인상 (미래만)
     fixed_alerts_future, fixed_alerts_past = get_fixed_room_alerts(curr, all_events)
     if fixed_alerts_future:

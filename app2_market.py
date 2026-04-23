@@ -308,107 +308,101 @@ def get_tourist_data_only():
 @st.cache_data(ttl=600)
 def get_db_bookings_raw():
     """
-    hotel_bookings 컬렉션의 원본(raw) 데이터를 그대로 DF로 반환.
-    (문서당 1건의 예약 = 한 row)
-    한글 컬럼(입실일자, 객실료, 거래처, 객실타입 등)이 그대로 살아있음.
-    탭2(리드타임/채널 분석)에서 이 원본 사용.
+    hotel_bookings 컬렉션 원본 반환 (예약 1건 = 1row).
+    실제 필드: 입실일자(DatetimeWithNanoseconds), 총금액(int),
+               객실료(int), 박수(int), 객실타입, 거래처, 상태 등
     """
     try:
-        if not db_hotel: return pd.DataFrame()
+        if not db_hotel:
+            return pd.DataFrame()
         docs = db_hotel.collection('hotel_bookings').stream()
         data = [d.to_dict() for d in docs]
+        if not data:
+            return pd.DataFrame()
         df = pd.DataFrame(data)
-        if df.empty:
-            return df
 
-        # 입실일자 / 접수일자 / 퇴실일자 자동 datetime 변환
-        for date_col in ['입실일자', '접수일자', '퇴실일자', '예약일자', 'date']:
+        # ── 날짜 컬럼: DatetimeWithNanoseconds → pandas datetime ──
+        for date_col in ['입실일자', '퇴실일자', '예약일자', '확인일자', '취소일자']:
             if date_col in df.columns:
-                df[date_col] = pd.to_datetime(df[date_col], errors='coerce').dt.tz_localize(None).dt.normalize()
+                # utc=True로 받아서 tz 제거
+                df[date_col] = pd.to_datetime(
+                    df[date_col], errors='coerce', utc=True
+                ).dt.tz_localize(None).dt.normalize()
 
-        # 금액 컬럼들 자동 숫자 변환 (콤마 제거)
-        for rev_col in ['총금액', '객실료', '객단가']:
+        # ── 금액 컬럼: 이미 숫자지만 혹시 문자열 섞인 경우 대비 ──
+        for rev_col in ['총금액', '객실료', '객단가', '서비스료']:
             if rev_col in df.columns:
-                s = df[rev_col].astype(str).str.replace(',', '').str.replace(' ', '').replace('nan', '0')
-                df[f'{rev_col}_숫자'] = pd.to_numeric(s, errors='coerce').fillna(0)
+                df[rev_col] = pd.to_numeric(
+                    df[rev_col].astype(str).str.replace(',', '').str.strip(),
+                    errors='coerce'
+                ).fillna(0)
 
-        # 객실수 / 박수 숫자 변환
-        for num_col in ['객실수', '박수', '숙박일수']:
-            if num_col in df.columns:
-                df[num_col] = pd.to_numeric(df[num_col].astype(str).str.extract(r'(\d+)')[0], errors='coerce').fillna(0)
+        # ── 정수 컬럼 ──
+        for int_col in ['객실수', '박수']:
+            if int_col in df.columns:
+                df[int_col] = pd.to_numeric(df[int_col], errors='coerce').fillna(0)
+
+        # ── 취소 예약 제거 (상태: CO=체크아웃, CI=체크인, RES=예약 / CXL=취소) ──
+        if '상태' in df.columns:
+            df = df[~df['상태'].astype(str).str.contains('CXL|취소|Cancel', case=False, na=False)]
 
         return df
+
     except Exception as e:
-        st.warning(f"⚠️ get_db_bookings_raw 에러: {e}")
+        st.warning(f"⚠️ get_db_bookings_raw 오류: {e}")
         return pd.DataFrame()
 
 
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
     """
-    hotel_bookings를 '일자별 집계'로 표준화해 반환.
-    표준 스키마: date / otb_revenue / rooms_sold (+ 한글 호환 컬럼)
-
-    원본이 예약 단위이므로 입실일자 기준으로 groupby 집계.
-    '소계/합계' 행은 사전에 제외.
+    hotel_bookings를 '입실일자별 집계'로 반환.
+    실제 필드 기반: 총금액(매출), 박수(RN) 사용.
+    표준 스키마: date / otb_revenue / rooms_sold
     """
     try:
         raw = get_db_bookings_raw()
         if raw.empty:
-            return raw
+            return pd.DataFrame()
 
-        # 입실일자가 있어야 집계 가능
         if '입실일자' not in raw.columns:
-            # 혹시 이미 표준 스키마(date)로 저장된 경우 (구버전 잔존 데이터)
-            if 'date' in raw.columns:
-                return normalize_otb_columns(raw)
-            st.warning("⚠️ hotel_bookings에서 '입실일자' 컬럼을 찾지 못했습니다.")
+            st.warning("⚠️ '입실일자' 컬럼 없음")
             return pd.DataFrame()
-
-        # 합계/소계 행 제거 (혹시 저장 중 섞여 들어간 경우)
-        if '거래처' in raw.columns:
-            raw = raw[~raw['거래처'].astype(str).str.contains('합계|소계|Total', case=False, na=False)]
-
-        # 매출 컬럼 선택 (우선순위: 총금액_숫자 > 객실료_숫자)
-        rev_col = None
-        for c in ['총금액_숫자', '객실료_숫자']:
-            if c in raw.columns:
-                rev_col = c
-                break
-        if not rev_col:
-            st.warning("⚠️ 매출 컬럼(총금액/객실료)을 찾지 못했습니다.")
-            return pd.DataFrame()
-
-        # 객실수 컬럼
-        rooms_col = None
-        for c in ['객실수', '박수']:
-            if c in raw.columns:
-                rooms_col = c
-                break
-
-        # 일자별 집계
-        agg_dict = {rev_col: 'sum'}
-        if rooms_col:
-            agg_dict[rooms_col] = 'sum'
 
         raw = raw.dropna(subset=['입실일자'])
+
+        # 입실일자별 집계: 총금액 합산, 박수 합산
+        agg_dict = {}
+        if '총금액' in raw.columns:
+            agg_dict['총금액'] = 'sum'
+        if '박수' in raw.columns:
+            agg_dict['박수'] = 'sum'
+        if '객실수' in raw.columns:
+            agg_dict['객실수'] = 'sum'
+
+        if not agg_dict:
+            st.warning("⚠️ 집계할 금액/박수 컬럼 없음")
+            return pd.DataFrame()
+
         daily = raw.groupby('입실일자').agg(agg_dict).reset_index()
 
-        # 표준 스키마로 이름 맞추기
-        daily = daily.rename(columns={
-            '입실일자': 'date',
-            rev_col: 'otb_revenue',
-        })
-        if rooms_col:
-            daily = daily.rename(columns={rooms_col: 'rooms_sold'})
+        # 표준 스키마 컬럼명으로 변환
+        daily = daily.rename(columns={'입실일자': 'date'})
+        if '총금액' in daily.columns:
+            daily = daily.rename(columns={'총금액': 'otb_revenue'})
+        if '박수' in daily.columns:
+            daily = daily.rename(columns={'박수': 'rooms_sold'})
+        elif '객실수' in daily.columns:
+            daily = daily.rename(columns={'객실수': 'rooms_sold'})
         else:
             daily['rooms_sold'] = 0
 
-        # 양방향 호환 컬럼 유지
+        # 양방향 호환 컬럼 추가
         daily = normalize_otb_columns(daily)
-        return daily
+        return daily.sort_values('date').reset_index(drop=True)
+
     except Exception as e:
-        st.warning(f"⚠️ get_db_bookings_only 에러: {e}")
+        st.warning(f"⚠️ get_db_bookings_only 오류: {e}")
         return pd.DataFrame()
 
 

@@ -226,43 +226,51 @@ def get_db_bookings_only():
 # 4. 메인 UI 렌더링 시작 (로그인 통과 후 실행)
 # =========================================================================
 
-# 1️⃣ 여기는 '본문' 영역입니다 (화면 중앙)
-st.title("🚀 2026 비상: 시크릿 전략 페이지")
-st.markdown("---")
-
-# 2️⃣ 여기는 '사이드바' 영역입니다 (왼쪽 메뉴)
 with st.sidebar:
     st.header("🏨 호텔 데이터 사령부")
-    st.caption("amber-otb-pickup (Hotel DB) 연동 중")
+    st.caption("amber-otb-pickup (Hotel DB) 연동")
 
-    # [1] 파일 업로드 기능
-    uploaded_files = st.file_uploader("월별 OTB 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
-    
+    # [1] 클라우드 데이터 불러오기 버튼 (가장 중요!)
+    if st.button("🔄 클라우드 데이터 가져오기", use_container_width=True, type="primary"):
+        with st.spinner("호텔 전용 DB에서 데이터를 동기화 중..."):
+            cloud_df = get_db_bookings_only() # 이 함수가 firebase_hotel을 씁니다.
+            if not cloud_df.empty:
+                # DB 컬럼명을 분석용 표준 컬럼명으로 변환
+                rename_map = {'입실일자': 'date', '총금액_숫자': 'revenue', '박수': 'rooms_sold'}
+                # 실제 DB에 있는 컬럼명에 맞춰 유연하게 변환
+                for old_col, new_col in rename_map.items():
+                    if old_col in cloud_df.columns:
+                        cloud_df = cloud_df.rename(columns={old_col: new_col})
+                
+                st.session_state['otb_data'] = cloud_df
+                st.success(f"✅ {len(cloud_df)}건의 예약 데이터를 불러왔습니다.")
+                st.rerun()
+            else:
+                st.error("❌ DB에 저장된 데이터가 없습니다.")
+
+    st.markdown("---")
+
+    # [2] 파일 업로드 및 저장 기능
+    uploaded_files = st.file_uploader("새 OTB 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
     if uploaded_files:
         parsed_df = parse_uploaded_files(uploaded_files)
         if not parsed_df.empty:
             st.session_state['otb_data'] = parsed_df
-            st.success(f"✅ {len(parsed_df)}건 로드 완료")
+            st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
             
-            # 🔥 [추가] 호텔 클라우드(Firebase Hotel)에 즉시 저장 버튼
-            if st.button("📤 이 데이터를 호텔 클라우드에 영구 저장", use_container_width=True):
+            if st.button("📤 이 데이터를 클라우드(Hotel DB)에 저장", use_container_width=True):
                 if db_hotel:
-                    with st.spinner("호텔 DB 업로드 중..."):
+                    with st.spinner("업로드 중..."):
                         try:
-                            # 기존 데이터와 섞이지 않게 'hotel_bookings' 컬렉션에 한 줄씩 저장
-                            # (실무용: 대량 업로드 시에는 batch 사용 권장)
                             batch = db_hotel.batch()
                             for _, row in parsed_df.iterrows():
-                                # 날짜를 ID로 쓰거나 유니크 키 생성
-                                doc_id = f"{row['date'].strftime('%Y%m%d')}_{np.random.randint(1000,9999)}"
+                                doc_id = f"res_{row['date'].strftime('%Y%m%d')}_{np.random.randint(100,999)}"
                                 doc_ref = db_hotel.collection("hotel_bookings").document(doc_id)
-                                # 저장용 딕셔너리 변환
-                                data_to_save = row.to_dict()
-                                data_to_save['date'] = data_to_save['date'].isoformat() # 날짜 직렬화
-                                batch.set(doc_ref, data_to_save)
+                                d_dict = row.to_dict()
+                                d_dict['date'] = d_dict['date'].isoformat()
+                                batch.set(doc_ref, d_dict)
                             batch.commit()
-                            st.success("🚀 호텔 클라우드 저장 성공!")
-                            st.cache_data.clear() # 저장 후 클라우드 데이터를 다시 읽어오기 위해 캐시 삭제
+                            st.success("🚀 저장 완료!")
                         except Exception as e:
                             st.error(f"저장 실패: {e}")
 
@@ -443,23 +451,17 @@ with tab2:
     st.header("🏨 엠버퓨어힐 OTB 심화 분석 (Deep Dive)")
     st.caption("실시간 예약 DB(Firebase)를 연동하여, 선택한 기간의 예약 속도(Pace)와 퀄리티를 입체적으로 분석합니다.")
 
-    # 💡 [핵심 로직] 세션에 데이터가 없으면 클라우드(hotel_app)에서 직접 긁어옵니다.
-    if 'otb_data' not in st.session_state or st.session_state['otb_data'].empty:
+    # 💡 [핵심 로직] 세션 데이터를 우선 사용하고, 없으면 클라우드 DB 호출
+    df_h_raw = st.session_state.get('otb_data', pd.DataFrame())
+    if df_h_raw.empty:
         with st.spinner("호텔 클라우드(amber-otb-pickup)에서 데이터를 가져오는 중..."):
-            cloud_df = get_db_bookings_only() # 이 함수는 db_hotel(호텔 프로젝트)을 씁니다.
-            if not cloud_df.empty:
-                # 함수 내부 컬럼명(입실일자 등)을 분석용 컬럼명(date, revenue)으로 변환
-                cloud_df = cloud_df.rename(columns={
-                    '입실일자': 'date', 
-                    '총금액_숫자': 'revenue',
-                    '박수': 'rooms_sold' # 실제 컬럼명에 맞춰 조정 필요
-                })
-                st.session_state['otb_data'] = cloud_df
-
-    with st.spinner("예약 데이터를 불러와 필드를 매핑 중입니다..."):
-        df_h_raw = get_db_bookings_only()
+            df_h_raw = get_db_bookings_only()
 
     if not df_h_raw.empty:
+        # 💡 [번역 브릿지] 업로드된 온북 파일(date, otb_revenue)을 기존 PMS 컬럼명으로 호환시켜줌
+        if 'date' in df_h_raw.columns and '입실일자' not in df_h_raw.columns:
+            df_h_raw = df_h_raw.rename(columns={'date': '입실일자', 'otb_revenue': '총금액_숫자', 'rooms_sold': '박수'})
+
         def safe_to_datetime(series):
             return pd.to_datetime(series, errors='coerce', utc=True)
 
@@ -527,11 +529,11 @@ with tab2:
             st.markdown("---")
             st.subheader("📈 Booking Pace (선택 기간 기준)")
             target_months = df_h['checkin_month'].unique()
-            df_pace = df_h[df_h['checkin_month'].isin(target_months)].copy()
+            df_pace_chart = df_h[df_h['checkin_month'].isin(target_months)].copy()
             
-            if not df_pace.empty:
-                df_pace['booking_order'] = df_pace['lead_time'] * -1 
-                pace_chart_data = df_pace.groupby(['checkin_month', 'booking_order'])['revenue'].sum().reset_index()
+            if not df_pace_chart.empty:
+                df_pace_chart['booking_order'] = df_pace_chart['lead_time'] * -1 
+                pace_chart_data = df_pace_chart.groupby(['checkin_month', 'booking_order'])['revenue'].sum().reset_index()
                 pace_chart_data = pace_chart_data.sort_values(['checkin_month', 'booking_order'])
                 pace_chart_data['cum_revenue'] = pace_chart_data.groupby('checkin_month')['revenue'].cumsum()
                 
@@ -561,6 +563,8 @@ with tab2:
                     ch_stats = df_h.groupby('channel_sim').agg(rev=('revenue', 'sum'), adr=('revenue', 'mean')).reset_index()
                     fig_ch = px.treemap(ch_stats, path=['channel_sim'], values='rev', color='adr', color_continuous_scale='RdBu')
                     st.plotly_chart(fig_ch, use_container_width=True)
+                else:
+                    st.info("요약 온북 파일에는 거래처 정보가 없습니다. 상세 분석을 보려면 PMS 원본을 로드하세요.")
 
             st.markdown("---")
             st.subheader("📅 요일별/월별 예약 집중도")
@@ -570,7 +574,8 @@ with tab2:
                 fig_heat = px.density_heatmap(heat_data, x='checkin_month', y='checkin_day', z='revenue',
                                                 category_orders={'checkin_day': days_ord}, color_continuous_scale='Greens')
                 st.plotly_chart(fig_heat, use_container_width=True)
-    else: st.warning("분석할 예약 데이터가 없습니다.")
+    else: 
+        st.warning("분석할 예약 데이터가 없습니다. 사이드바에서 파일을 업로드하거나 클라우드 데이터를 가져오세요.")
 
 # --- TAB 3: 경쟁사 비교 ---
 with tab3:
@@ -803,11 +808,21 @@ with tab5:
 with tab6:
     st.header("📜 과거 성과 분석 & Pace Report")
     with st.spinner("데이터 분석 중..."):
-        df_pace = get_db_bookings_only()
+        # 💡 [핵심 로직] 세션 데이터를 우선 사용하고, 없으면 클라우드 DB 호출
+        df_pace = st.session_state.get('otb_data', pd.DataFrame())
+        if df_pace.empty:
+            df_pace = get_db_bookings_only()
+            
         df_t = get_tourist_data_only()
     
     st.subheader("1. 과거 성과 복기 (Revenue vs Tourist)")
-    if not df_pace.empty and not df_t.empty:
+    
+    if not df_pace.empty:
+        # 💡 [번역 브릿지] 업로드된 온북 파일(date, otb_revenue)을 기존 PMS 컬럼명으로 호환시켜줌
+        if 'date' in df_pace.columns and '입실일자' not in df_pace.columns:
+            df_pace = df_pace.rename(columns={'date': '입실일자', 'otb_revenue': '총금액_숫자'})
+    
+    if not df_pace.empty and not df_t.empty and '입실일자' in df_pace.columns:
         df_rev_daily = df_pace.groupby('입실일자')['총금액_숫자'].sum().reset_index(name='daily_rev')
         df_rev_daily.rename(columns={'입실일자':'date'}, inplace=True)
         df_backtest = pd.merge(df_rev_daily, df_t, on='date', how='inner')
@@ -821,7 +836,8 @@ with tab6:
             fig_bt.add_trace(go.Scatter(x=df_backtest['date'], y=df_backtest['total'], name="총 입도객", line=dict(color='blue')), secondary_y=True)
             fig_bt.add_trace(go.Scatter(x=df_backtest['date'], y=df_backtest['foreign'], name="외국인", line=dict(color='orange', dash='dot')), secondary_y=True)
             st.plotly_chart(fig_bt, use_container_width=True)
-        else: st.info("매출과 입도객 날짜가 겹치지 않습니다.")
+        else: 
+            st.info("매출 날짜와 입도객 날짜가 겹치는 구간이 없습니다.")
 
     st.markdown("---")
     st.subheader("2. Pace Report (전년 대비 성장 속도)")
@@ -848,6 +864,8 @@ with tab6:
         fig_pc.update_xaxes(type='category', categoryorder='category ascending')
         
         st.plotly_chart(fig_pc, use_container_width=True)
+    else:
+        st.warning("Pace Report를 분석할 데이터가 부족합니다.")
 
 # --- TAB 7: 전략 사령부 (BI) ---
 with tab7:

@@ -317,7 +317,7 @@ def get_db_bookings_raw():
         if not data: return pd.DataFrame()
         df = pd.DataFrame(data)
 
-        # 1. 예약번호 필수 필터 (가짜 요약본 차단)
+        # 1. 예약번호 필수 필터 (가짜/빈 데이터 차단)
         if '예약번호' in df.columns:
             df = df[df['예약번호'].notna() & (df['예약번호'].astype(str).str.strip() != '')]
             df = df.drop_duplicates(subset=['예약번호'], keep='first')
@@ -339,31 +339,36 @@ def get_db_bookings_raw():
         # 🚀 3. 취소 예약 '이중 철통 방어' (상태코드 + 취소일자 교차 검증)
         # ==============================================================
         if '상태' in df.columns:
-            # PMS 취소/노쇼 코드 총망라
             df = df[~df['상태'].astype(str).str.contains('CX|NS|CXL|취소|Cancel|RC', case=False, na=False)]
         
         if '취소일자' in df.columns:
-            # 💡 상태코드와 무관하게 '취소일자'에 날짜가 적혀있으면 100% 취소건이므로 무조건 삭제!
-            # (.isna() 인 데이터 = 취소일자가 비어있는 진짜 확정 예약만 남김)
+            # 💡 취소일자에 날짜가 적혀있으면 상태와 무관하게 100% 취소건! (.isna()인 진짜 확정만 남김)
             df = df[df['취소일자'].isna()]
 
         # ==============================================================
         # 🚀 4. 단체(Master) / 멤버 중복 뻥튀기 완벽 제거
         # ==============================================================
-        # '단체'와 '단체멤버'가 같이 섞여 있으면 박수(RN)가 정확히 2배가 됩니다.
-        # 전체 텍스트 컬럼을 뒤져서 '단체'라고 명시된 마스터 예약 행만 족집게처럼 찾아내 삭제합니다.
-        found_col = False
-        for col in df.select_dtypes(include=['object']).columns:
-            vals = df[col].astype(str).str.strip()
-            if vals.isin(['단체멤버']).any():
-                df = df[vals != '단체']  # '단체'(마스터) 삭제, '단체멤버'는 유지
-                found_col = True
-                break
+        if '단체 ID' in df.columns:
+            # 단체 ID가 존재하는 예약만 추출
+            group_mask = df['단체 ID'].notna() & (df['단체 ID'].astype(str).str.strip() != '') & (df['단체 ID'].astype(str).str.lower() != 'nan')
+            
+            df_group = df[group_mask]
+            if not df_group.empty:
+                # 단체 ID별로 묶어서 행이 2개 이상인 경우(마스터+멤버 동시 다운로드) 찾기
+                group_counts = df_group['단체 ID'].value_counts()
+                mixed_groups = group_counts[group_counts > 1].index
                 
-        if not found_col:
-            # 명시된 컬럼을 못 찾았을 경우 전체 셀을 스캔하여 '단체'를 삭제
-            mask_master = df.apply(lambda row: row.astype(str).str.strip().eq('단체').any(), axis=1)
-            df = df[~mask_master]
+                if len(mixed_groups) > 0:
+                    df_mixed = df[df['단체 ID'].isin(mixed_groups)]
+                    
+                    # 1) 각 단체 ID별로 '객실수'가 가장 큰 행을 마스터(Master)로 지정하여 보호
+                    master_indices = df_mixed.groupby('단체 ID')['객실수'].idxmax().values
+                    
+                    # 2) 마스터가 아니면서(멤버), 총금액이 0원인 껍데기 예약들을 모두 식별
+                    members_to_drop = df_mixed[~df_mixed.index.isin(master_indices) & (df_mixed['총금액'] == 0)].index
+                    
+                    # 3) 껍데기 멤버 삭제 (RN 중복 원천 차단)
+                    df = df.drop(index=members_to_drop)
 
         # 5. 조식 마킹
         if '서비스코드' in df.columns:
@@ -376,7 +381,6 @@ def get_db_bookings_raw():
     except Exception as e:
         st.warning(f"⚠️ get_db_bookings_raw 오류: {e}")
         return pd.DataFrame()
-
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
     """

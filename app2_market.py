@@ -832,15 +832,16 @@ with tab2:
         st.markdown("---")
 
         if not df_h.empty:
+            total_bk = len(df_h) # 예약 건수
             total_rev = df_h['revenue'].sum()  # 총금액 합계
 
-            # ⭐ 객실료 합계 (순수 객실 매출)
+            # ⭐ 1. 객실료 합계 (순수 객실 매출)
             if '객실료' in df_h.columns:
                 room_rev = pd.to_numeric(df_h['객실료'], errors='coerce').fillna(0).sum()
             else:
                 room_rev = total_rev
 
-            # ⭐ RoomNight = 박수 × 객실수 (정확한 ADR 분모)
+            # ⭐ 2. RoomNight = 박수 × 객실수 (정확한 ADR 분모)
             if '박수' in df_h.columns and '객실수' in df_h.columns:
                 df_h['room_nights'] = (
                     pd.to_numeric(df_h['박수'], errors='coerce').fillna(1) *
@@ -850,36 +851,27 @@ with tab2:
             elif '박수' in df_h.columns:
                 total_rn = pd.to_numeric(df_h['박수'], errors='coerce').fillna(1).sum()
             else:
-                total_rn = len(df_h)
+                total_rn = total_bk
 
-            # 조식 비중 계산
+            # ⭐ 3. 조식 포함 비중 계산
             if 'is_breakfast' in df_h.columns:
                 bf_count = df_h['is_breakfast'].sum()
-                bf_ratio = (bf_count / len(df_h) * 100) if len(df_h) > 0 else 0
+                bf_ratio = (bf_count / total_bk * 100) if total_bk > 0 else 0
             else:
-                bf_ratio = 0
+                bf_count, bf_ratio = 0, 0
 
-            k1, k2, k3, k4, k5 = st.columns(5) # 컬럼을 5개로 늘립니다.
-            k1.metric("기간 총 매출", f"{int(total_rev):,}원")
-            k2.metric("판매 객실수(RN)", f"{int(total_rn):,} RN")
-            k3.metric("평균 ADR", f"{int(adr_total):,}원")
-            k4.metric("평균 리드타임", f"{avg_lead:.1f}일")
-            k5.metric("조식 포함 비중", f"{bf_ratio:.1f}%", f"{int(bf_count)}건")
-
-            total_bk = len(df_h)
-            adr_total = total_rev / total_rn if total_rn > 0 else 0       # 총금액 기준 ADR
-            adr_room  = room_rev  / total_rn if total_rn > 0 else 0       # 객실료 기준 ADR
+            # ⭐ 4. 파생 변수 최종 계산 (화면 출력 전 필수!)
+            adr_total = total_rev / total_rn if total_rn > 0 else 0        # 총금액 기준 ADR
+            adr_room  = room_rev  / total_rn if total_rn > 0 else 0        # 객실료 기준 ADR
             avg_lead  = df_h['lead_time'].mean() if 'lead_time' in df_h.columns else 0
 
-            k1, k2, k3, k4 = st.columns(4)
-            k1.metric("기간 총 매출 (총금액)", f"{int(total_rev):,}원",
-                      f"객실료 {int(room_rev):,}원")
-            k2.metric("기간 예약 건수 / RoomNight",
-                      f"{total_bk:,}건",
-                      f"{int(total_rn):,} RN")
-            k3.metric("ADR (총금액 ÷ RN)", f"{int(adr_total):,}원")
-            k4.metric("ADR (객실료 ÷ RN)", f"{int(adr_room):,}원",
-                      f"리드타임 평균 {avg_lead:.1f}일")
+            # 💡 5. 화면 출력 (중복 없이 5칸으로 깔끔하게 통합!)
+            k1, k2, k3, k4, k5 = st.columns(5)
+            k1.metric("기간 총 매출", f"{int(total_rev):,}원", f"객실료 {int(room_rev):,}원")
+            k2.metric("예약건수 / RN", f"{total_bk:,}건", f"{int(total_rn):,} RN")
+            k3.metric("ADR(총금액)", f"{int(adr_total):,}원")
+            k4.metric("ADR(객실료)", f"{int(adr_room):,}원", f"리드타임 {avg_lead:.1f}일")
+            k5.metric("조식 포함", f"{bf_ratio:.1f}%", f"{int(bf_count)}건")
 
             st.markdown("---")
             st.subheader("📈 Booking Pace")

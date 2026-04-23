@@ -33,39 +33,52 @@ if 'otb_data' not in st.session_state:
     st.session_state['otb_data'] = pd.DataFrame()
 
 # =============================================================================
-# 2. 🔥 Firebase 표준 초기화 (3개 DB 명확하게 강제 지정)
+# 2. 🔥 Firebase 강제 재접속 (프로젝트 꼬임 완전 방지)
 # =============================================================================
-def _init_firebase_app(app_name, secret_key):
-    existing = [a.name for a in firebase_admin._apps.values()] if firebase_admin._apps else []
-    if app_name in existing:
-        return firebase_admin.get_app(app_name)
+def _init_force_db(app_name, secret_key):
+    # 기존에 혹시나 떠 있는 동일 이름의 앱이 있다면 삭제하고 새로 고침
+    try:
+        if app_name in firebase_admin._apps:
+            old_app = firebase_admin.get_app(app_name)
+            firebase_admin.delete_app(old_app)
+    except: pass
+
     if secret_key not in st.secrets:
+        st.error(f"🚨 {secret_key} 설정이 secrets에 없습니다.")
         return None
+
     try:
         secret_dict = dict(st.secrets[secret_key])
         if "private_key" in secret_dict:
             secret_dict["private_key"] = secret_dict["private_key"].replace("\\n", "\n")
+        
+        # 💡 [핵심] project_id가 secrets에 적힌 것과 일치하는지 강제 확인
+        actual_id = secret_dict.get("project_id")
+        
         cred = credentials.Certificate(secret_dict)
-        return firebase_admin.initialize_app(cred, name=app_name)
+        new_app = firebase_admin.initialize_app(cred, name=app_name)
+        
+        st.sidebar.caption(f"📍 연결 시도: {app_name} -> {actual_id}")
+        return new_app
     except Exception as e:
+        st.sidebar.error(f"❌ {app_name} 연결 실패: {e}")
         return None
 
-# 1) 각 프로젝트 앱 인스턴스 생성
-# ⚠️ 주의: [firebase_hotel]이 'amber-otb-pickup' 프로젝트여야 합니다!
-app_hotel  = _init_firebase_app("hotel_app",  "firebase_hotel") 
-app_flight = _init_firebase_app("flight_app", "firebase_flight")
-app_rate   = _init_firebase_app("rate_app",   "firebase")
+# ⭐ 앱 이름을 완전히 새롭게 정의해서 과거의 망령(amber-rate)을 제거합니다.
+app_hotel  = _init_force_db("hotel_real_v1", "firebase_hotel") 
+app_flight = _init_force_db("flight_real_v1", "firebase_flight")
+app_rate   = _init_force_db("rate_real_v1",   "firebase")
 
-# 2) 클라이언트 변수 할당 (여기서 변수가 꼬이지 않게 'app_instance'를 정확히 매칭)
-db_hotel  = firestore.client(app=app_hotel)  if app_hotel  else None # ⭐ 진짜 데이터 집
-db_flight = firestore.client(app=app_flight) if app_flight else None # ✈️ 항공/렌터카 집
-db_rate   = firestore.client(app=app_rate)   if app_rate   else None # 💰 요금 편집용 빈집
+# 클라이언트 할당
+db_hotel  = firestore.client(app=app_hotel)  if app_hotel  else None
+db_flight = firestore.client(app=app_flight) if app_flight else None
+db_rate   = firestore.client(app=app_rate)   if app_rate   else None
 
-# 💡 [검증] 지금 바로 db_hotel이 제대로 연결되었는지 화면에 강제 출력!
+# 💡 [최종 확인] 화면에 프로젝트 ID가 정확히 노출되는지 확인
 if db_hotel:
-    st.sidebar.success(f"🏠 현재 데이터 집: {app_hotel.project_id}")
-else:
-    st.sidebar.error("🚨 호텔 DB(firebase_hotel) 연결에 실패했습니다!")
+    st.sidebar.success(f"🏠 최종 데이터 집: {app_hotel.project_id}")
+    if app_hotel.project_id == "amber-rate":
+        st.sidebar.error("❗경고: 여전히 amber-rate에 접속 중입니다. Secrets 설정을 다시 확인하세요!")
 
 
 # =============================================================================

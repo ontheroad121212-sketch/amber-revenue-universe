@@ -33,23 +33,44 @@ if 'otb_data' not in st.session_state:
     st.session_state['otb_data'] = pd.DataFrame()
 
 # =============================================================================
-# 2. 🔥 Firebase 표준 초기화 (3개 DB)
+# 2. 🔥 Firebase 초기화 (앱 이름 충돌 방지 강화)
 # =============================================================================
 def _init_firebase_app(app_name, secret_key):
-    existing = [a.name for a in firebase_admin._apps.values()] if firebase_admin._apps else []
-    if app_name in existing:
-        return firebase_admin.get_app(app_name)
+    """
+    동일 앱 이름이 이미 존재하면 project_id를 비교해서
+    다른 프로젝트면 삭제 후 재초기화. 같으면 재사용.
+    → Streamlit 세션 공유로 인한 엉뚱한 앱 재사용 버그 방지.
+    """
     if secret_key not in st.secrets:
         return None
+
     try:
         secret_dict = dict(st.secrets[secret_key])
         if "private_key" in secret_dict:
             secret_dict["private_key"] = secret_dict["private_key"].replace("\\n", "\n")
+        expected_project = secret_dict.get("project_id", "")
+    except Exception:
+        return None
+
+    # 이미 같은 이름의 앱이 있으면 project_id 확인
+    try:
+        existing_app = firebase_admin.get_app(app_name)
+        existing_project = existing_app.project_id
+        if existing_project == expected_project:
+            return existing_app  # 같은 프로젝트 → 재사용 OK
+        else:
+            # 다른 프로젝트가 같은 이름으로 등록됨 → 삭제 후 재초기화
+            firebase_admin.delete_app(existing_app)
+    except ValueError:
+        pass  # 앱이 없으면 그냥 새로 만들기
+
+    try:
         cred = credentials.Certificate(secret_dict)
         return firebase_admin.initialize_app(cred, name=app_name)
     except Exception as e:
         st.error(f"❌ {app_name} ({secret_key}) 초기화 실패: {e}")
         return None
+
 
 def _get_client(app_instance):
     if not app_instance:
@@ -58,6 +79,7 @@ def _get_client(app_instance):
         return firestore.client(app=app_instance)
     except Exception:
         return None
+
 
 app_hotel  = _init_firebase_app("hotel_app",  "firebase_hotel")
 app_flight = _init_firebase_app("flight_app", "firebase_flight")
@@ -442,12 +464,27 @@ def save_otb_to_firebase(df):
 with st.sidebar:
     # 🔥 Firebase 연결 진단
     with st.expander("🔧 Firebase 연결 상태", expanded=False):
-        if db_hotel: st.success("✅ db_hotel (amber-otb-pickup)")
-        else: st.error("❌ db_hotel 실패")
-        if db_flight: st.success("✅ db_flight (viva2026)")
-        else: st.error("❌ db_flight 실패")
-        if db_rate: st.success("✅ db_rate (amber-rate)")
-        else: st.caption("⚪ db_rate - 미사용")
+        # db_hotel 실제 project_id 표시 (엉뚱한 프로젝트 연결 감지용)
+        if db_hotel:
+            try:
+                actual_project = app_hotel.project_id
+                expected = st.secrets.get("firebase_hotel", {}).get("project_id", "?")
+                if actual_project == expected:
+                    st.success(f"✅ db_hotel → `{actual_project}`")
+                else:
+                    st.error(f"⚠️ db_hotel 프로젝트 불일치!\n실제: `{actual_project}`\n기대: `{expected}`")
+            except Exception:
+                st.success("✅ db_hotel 연결됨")
+        else:
+            st.error("❌ db_hotel 실패")
+        if db_flight:
+            st.success(f"✅ db_flight → `{app_flight.project_id}`")
+        else:
+            st.error("❌ db_flight 실패")
+        if db_rate:
+            st.success(f"✅ db_rate → `{app_rate.project_id}`")
+        else:
+            st.caption("⚪ db_rate - 미사용")
 
     st.header("🏨 호텔 데이터 사령부")
     st.caption("amber-otb-pickup (Hotel DB) 연동")

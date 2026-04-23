@@ -285,20 +285,38 @@ def get_tourist_data_only():
 
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
-    if not db_hotel: 
-        st.error("🚨 삐빅! db_hotel 연결이 끊겨 있습니다! (secrets.toml 확인 요망)")
+    # 💡 [DB 스캐너] 3개의 파이어베이스 프로젝트를 모두 뒤집니다!
+    locations = {
+        "1. 호텔 DB (amber-otb-pickup)": db_hotel,
+        "2. 항공 DB (viva2026)": db_flight,
+        "3. 요금 DB (amber-rate)": db_rate
+    }
+    
+    found_db = None
+    
+    for db_name, db_client in locations.items():
+        if db_client:
+            try:
+                # 각 DB마다 hotel_bookings 컬렉션에 데이터가 1개라도 있는지 찔러봄
+                docs = list(db_client.collection('hotel_bookings').limit(1).stream())
+                if len(docs) > 0:
+                    st.success(f"🎯 빙고! 찾았습니다! 팀장님의 진짜 예약 데이터는 **{db_name}** 에 숨어있었습니다!")
+                    found_db = db_client
+                    break
+            except: pass
+            
+    if not found_db:
+        st.error("🚨 3개 DB를 다 뒤졌는데 'hotel_bookings' 데이터가 0개입니다. (스크린샷의 프로젝트 ID가 아예 다른 곳일 수 있습니다!)")
         return pd.DataFrame()
         
+    # 진짜 데이터가 있는 곳에서 풀스캔 시작
     try:
-        # DB에서 데이터 긁어오기
-        docs = db_hotel.collection('hotel_bookings').stream()
+        docs = found_db.collection('hotel_bookings').stream()
         data = [d.to_dict() for d in docs]
-        
-        # 💡 [엑스레이] 실제로 몇 개를 가져왔는지 화면에 강제 출력!
-        st.warning(f"🔍 [시스템 디버깅] 파이어베이스에서 {len(data)}개의 데이터를 발견했습니다.")
-        
         df = pd.DataFrame(data)
+        
         if not df.empty:
+            # 💡 호환성 브릿지 (이름표 자동 번역)
             if 'date' in df.columns and '입실일자' not in df.columns: df['입실일자'] = df['date']
             if 'otb_revenue' in df.columns and '총금액' not in df.columns and '총금액_숫자' not in df.columns: df['총금액_숫자'] = df['otb_revenue']
             if 'rooms_sold' in df.columns and '박수' not in df.columns: df['박수'] = df['rooms_sold']
@@ -314,8 +332,7 @@ def get_db_bookings_only():
                 
         return df
     except Exception as e:
-        # 💡 [엑스레이] 파이어베이스가 에러를 뱉으면 화면에 빨간 글씨로 출력!
-        st.error(f"🚨 파이어베이스 접근 중 치명적 에러 발생: {e}")
+        st.error(f"데이터 추출 중 에러: {e}")
         return pd.DataFrame()
 
 

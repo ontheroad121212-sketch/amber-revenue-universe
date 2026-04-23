@@ -285,9 +285,6 @@ def get_tourist_data_only():
 
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
-    """
-    사진에 있는 hotel_bookings (개별 예약 원본 데이터) 컬렉션에서 직접 데이터를 가져옵니다.
-    """
     try:
         if not db_hotel: return pd.DataFrame()
         docs = db_hotel.collection('hotel_bookings').stream()
@@ -295,17 +292,28 @@ def get_db_bookings_only():
         df = pd.DataFrame(data)
         
         if not df.empty:
-            # 원본 컬럼명 훼손 없이 날짜 타입만 안전하게 변환
-            if '입실일자' in df.columns: 
-                df['입실일자'] = pd.to_datetime(df['입실일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
-            if '접수일자' in df.columns: 
-                df['접수일자'] = pd.to_datetime(df['접수일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
-            if '예약일자' in df.columns: 
-                df['예약일자'] = pd.to_datetime(df['예약일자'], errors='coerce').dt.tz_localize(None).dt.normalize()
+            # 💡 [만능 브릿지] DB에 요약본('date')으로 저장되어 있든 원본('입실일자')으로 저장되어 있든 자동 호환!
+            if 'date' in df.columns and '입실일자' not in df.columns:
+                df['입실일자'] = df['date']
+            if 'otb_revenue' in df.columns and '총금액' not in df.columns and '총금액_숫자' not in df.columns:
+                df['총금액_숫자'] = df['otb_revenue']
+            if 'rooms_sold' in df.columns and '박수' not in df.columns:
+                df['박수'] = df['rooms_sold']
+
+            # 날짜 타입 안전 변환
+            for col in ['입실일자', '접수일자', '예약일자']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
+            
+            # 금액 타입 안전 변환
             if '총금액' in df.columns: 
                 df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '총금액_숫자' in df.columns:
+                df['총금액_숫자'] = pd.to_numeric(df['총금액_숫자'], errors='coerce').fillna(0)
+                
         return df
-    except:
+    except Exception as e:
+        st.error(f"DB 로딩 중 에러 발생: {e}") # 에러 추적용 메시지
         return pd.DataFrame()
 
 

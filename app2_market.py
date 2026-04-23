@@ -391,15 +391,20 @@ def get_db_bookings_only():
             st.warning("⚠️ '입실일자' 컬럼 없음")
             return pd.DataFrame()
 
+        # 💡 [에러 원천 차단] 꼬여있는 시간대를 강제로 다 떼어버리고 깔끔한 날짜만 남깁니다.
+        raw['입실일자'] = pd.to_datetime(raw['입실일자'], errors='coerce', utc=True).dt.tz_localize(None).dt.normalize()
         raw = raw.dropna(subset=['입실일자'])
 
-        # 입실일자별 집계: 총금액 합산, 박수 합산
+        # 💡 [안전한 계산] 숫자로 확실하게 변환 후 집계합니다.
         agg_dict = {}
         if '총금액' in raw.columns:
+            raw['총금액'] = pd.to_numeric(raw['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             agg_dict['총금액'] = 'sum'
         if '박수' in raw.columns:
+            raw['박수'] = pd.to_numeric(raw['박수'], errors='coerce').fillna(0)
             agg_dict['박수'] = 'sum'
         if '객실수' in raw.columns:
+            raw['객실수'] = pd.to_numeric(raw['객실수'], errors='coerce').fillna(0)
             agg_dict['객실수'] = 'sum'
 
         if not agg_dict:
@@ -412,6 +417,7 @@ def get_db_bookings_only():
         daily = daily.rename(columns={'입실일자': 'date'})
         if '총금액' in daily.columns:
             daily = daily.rename(columns={'총금액': 'otb_revenue'})
+        
         if '박수' in daily.columns:
             daily = daily.rename(columns={'박수': 'rooms_sold'})
         elif '객실수' in daily.columns:
@@ -420,7 +426,11 @@ def get_db_bookings_only():
             daily['rooms_sold'] = 0
 
         # 양방향 호환 컬럼 추가
-        daily = normalize_otb_columns(daily)
+        try:
+            daily = normalize_otb_columns(daily)
+        except:
+            pass
+            
         return daily.sort_values('date').reset_index(drop=True)
 
     except Exception as e:
@@ -431,9 +441,7 @@ def get_db_bookings_only():
 def save_otb_to_firebase(df):
     """
     온북 DF를 db_hotel의 hotel_bookings 컬렉션에 저장.
-    ⭐ 주의: 이 함수는 '일자별 요약' 데이터를 저장하는 용도.
-    doc_id를 'otb_YYYYMMDD'로 고정 → 같은 날짜 재업로드 시 덮어쓰기.
-    (실제 예약번호 단위의 PMS raw 데이터는 별도 경로로 저장됨)
+    ⭐ doc_id를 'otb_YYYYMMDD'로 고정 → 같은 날짜 재업로드 시 덮어쓰기.
     """
     if not db_hotel:
         return False, "DB 연결 없음"
@@ -448,19 +456,25 @@ def save_otb_to_firebase(df):
                 d_value = row.get('date')
                 if pd.isna(d_value):
                     continue
-                if not isinstance(d_value, pd.Timestamp):
-                    d_value = pd.to_datetime(d_value)
+                
+                # 💡 [에러 원천 차단] DB에 넣을 때 시간대 꼬리표를 떼고 저장!
+                d_value = pd.to_datetime(d_value, errors='coerce', utc=True).tz_localize(None)
+                if pd.isna(d_value): continue
+                
+                # isoformat() 대신 깔끔한 'YYYY-MM-DD' 포맷 사용
+                date_str = d_value.strftime('%Y-%m-%d') 
                 doc_id = f"otb_{d_value.strftime('%Y%m%d')}"
 
                 payload = {
-                    'date': d_value.isoformat(),
-                    # 한글 호환 컬럼도 함께 저장 → 탭2 집계 로직이 찾을 수 있도록
-                    '입실일자': d_value.isoformat(),
+                    'date': date_str,
+                    '입실일자': date_str,
                     'otb_revenue': float(row.get('otb_revenue', 0)),
                     '총금액_숫자': float(row.get('otb_revenue', 0)),
+                    '총금액': float(row.get('otb_revenue', 0)),
                     'rooms_sold': float(row.get('rooms_sold', 0)),
                     '객실수': float(row.get('rooms_sold', 0)),
-                    'updated_at': datetime.now().isoformat()
+                    '박수': float(row.get('rooms_sold', 0)),
+                    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
                 batch.set(db_hotel.collection('hotel_bookings').document(doc_id), payload)
                 count += 1

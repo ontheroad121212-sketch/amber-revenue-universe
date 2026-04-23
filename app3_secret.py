@@ -1071,10 +1071,39 @@ with tabs[0]:
     }
     
     daily_otb_dict = {}
+    
+    # 1. 하드코딩된 과거 데이터 베이스 깔기
     if selected_month in FACT_DB:
         for day_k, val in FACT_DB[selected_month].items():
             daily_otb_dict[day_k] = val / 100000000
 
+    # 💡 2. [추가] Firebase 스냅샷 징검다리로 빈칸(14일~어제) 자동 복구!
+    if 'db_flight' in locals() and db_flight:
+        try:
+            # 오름차순(과거->최신)으로 불러와 덮어쓰기 (같은 날 여러번 저장했어도 무조건 최신값이 남음)
+            snaps = db_flight.collection('amber_snapshots').order_by('timestamp').stream()
+            for doc in snaps:
+                d = doc.to_dict()
+                created_at_str = d.get('created_at', '')
+                if not created_at_str: continue
+                
+                dt = datetime.strptime(created_at_str, '%Y-%m-%d %H:%M:%S')
+                
+                # 스냅샷 저장월과 조회월이 같을 때만 추출
+                if dt.month == selected_month:
+                    sob_data = d.get('sob_data', {})
+                    str_m, int_m = str(selected_month), selected_month
+                    
+                    rev_val = 0
+                    if str_m in sob_data: rev_val = sob_data[str_m].get('rev', 0)
+                    elif int_m in sob_data: rev_val = sob_data[int_m].get('rev', 0)
+                    
+                    if rev_val > 0:
+                        daily_otb_dict[dt.day] = rev_val / 100000000
+        except Exception:
+            pass
+
+    # 3. 오늘 업로드한 최신 SOB 파일 덮어쓰기
     if sob_files:
         for f in sob_files:
             try:
@@ -1110,10 +1139,10 @@ with tabs[0]:
         for d in range(1, actual_last_day + 1):
             if d in daily_otb_dict:
                 current_val = daily_otb_dict[d]
-                if last_val > 0 and current_val < last_val * 0.8:
-                    pass
-                else:
-                    last_val = current_val
+                # 💡 [핵심 수정] 20% 폭락 방어막 등 쓸데없는 제약 다 풀고 무조건 실제 취소액 반영
+                last_val = current_val
+            
+            # 중간에 데이터 없는 날짜는 가장 최근 값으로 평탄화
             booking_pace_m.append(last_val)
         
         cur_rev_sob = booking_pace_m[-1] * 100000000 if booking_pace_m else 0

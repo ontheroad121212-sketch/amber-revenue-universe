@@ -309,8 +309,6 @@ def get_tourist_data_only():
 def get_db_bookings_raw():
     """
     hotel_bookings 컬렉션 원본 반환 (예약 1건 = 1row).
-    실제 필드: 입실일자(DatetimeWithNanoseconds), 총금액(int),
-               객실료(int), 박수(int), 객실타입, 거래처, 상태 등
     """
     try:
         if not db_hotel:
@@ -321,15 +319,23 @@ def get_db_bookings_raw():
             return pd.DataFrame()
         df = pd.DataFrame(data)
 
-        # ── 날짜 컬럼: DatetimeWithNanoseconds → pandas datetime ──
+        # ==============================================================
+        # 🚀 1. 중복 데이터 완벽 제거 (단체/단체멤버 중복 다운로드 방어)
+        # ==============================================================
+        if '예약번호' in df.columns:
+            # 1) 예약번호가 없는 가짜/빈 데이터 제거
+            df = df[df['예약번호'].notna() & (df['예약번호'].astype(str).str.strip() != '')]
+            # 2) 예약번호가 똑같은 데이터가 여러 개면 가장 처음 1개만 남기고 싹 다 버림! (중복 카운팅 해결)
+            df = df.drop_duplicates(subset=['예약번호'], keep='first')
+
+        # ── 날짜 컬럼 ──
         for date_col in ['입실일자', '퇴실일자', '예약일자', '확인일자', '취소일자']:
             if date_col in df.columns:
-                # utc=True로 받아서 tz 제거
                 df[date_col] = pd.to_datetime(
                     df[date_col], errors='coerce', utc=True
                 ).dt.tz_localize(None).dt.normalize()
 
-        # ── 금액 컬럼: 이미 숫자지만 혹시 문자열 섞인 경우 대비 ──
+        # ── 금액 컬럼 ──
         for rev_col in ['총금액', '객실료', '객단가', '서비스료']:
             if rev_col in df.columns:
                 df[rev_col] = pd.to_numeric(
@@ -342,9 +348,17 @@ def get_db_bookings_raw():
             if int_col in df.columns:
                 df[int_col] = pd.to_numeric(df[int_col], errors='coerce').fillna(0)
 
-        # ── 취소 예약 제거 (상태: CO=체크아웃, CI=체크인, RES=예약 / CXL=취소) ──
+        # ==============================================================
+        # 🚀 2. 취소 예약 완벽 제거 (팀장님 지시: RC 코드 추가!)
+        # ==============================================================
         if '상태' in df.columns:
-            df = df[~df['상태'].astype(str).str.contains('CXL|취소|Cancel', case=False, na=False)]
+            df = df[~df['상태'].astype(str).str.contains('CXL|취소|Cancel|RC', case=False, na=False)]
+
+        # ── 조식 마킹 ──
+        if '서비스코드' in df.columns:
+            df['is_breakfast'] = df['서비스코드'].astype(str).str.lower().str.contains('bf', na=False)
+        else:
+            df['is_breakfast'] = False
 
         return df
 

@@ -132,9 +132,18 @@ def normalize_otb_columns(df):
     if 'rooms_sold' in df.columns and '박수' not in df.columns:
         df['박수'] = df['rooms_sold']
 
-    # 타입 변환
+    # 타입 변환 (tz 이미 제거된 datetime은 건드리지 않음)
     if 'date' in df.columns:
-        df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+        # 이미 datetime이고 tz-naive면 그대로 두고, 아닐 때만 안전 변환
+        if not pd.api.types.is_datetime64_any_dtype(df['date']):
+            df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        # tz-aware면 tz 제거 (tz-naive는 건드리지 않음)
+        try:
+            if df['date'].dt.tz is not None:
+                df['date'] = df['date'].dt.tz_localize(None)
+        except (TypeError, AttributeError):
+            pass
+        df['date'] = df['date'].dt.normalize()
         df['입실일자'] = df['date']
     if 'otb_revenue' in df.columns:
         if df['otb_revenue'].dtype == object:
@@ -555,13 +564,29 @@ def load_daily_snapshot(snapshot_date=None):
             return pd.DataFrame(), {'snapshot_date': snapshot_date, 'error': '일별 데이터 없음'}
 
         df = pd.DataFrame(all_rows)
-        df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
-        df = df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        # tz-aware면 제거
+        try:
+            if df['date'].dt.tz is not None:
+                df['date'] = df['date'].dt.tz_localize(None)
+        except (TypeError, AttributeError):
+            pass
+        df['date'] = df['date'].dt.normalize()
+        df = df.dropna(subset=['date'])
+
+        # ⭐ 비정상 날짜 필터 (1970년 같은 epoch 파싱 실패)
+        df = df[df['date'] >= pd.Timestamp('2020-01-01')]
+        df = df[df['date'] <= pd.Timestamp('2030-12-31')]
+
+        df = df.sort_values('date').reset_index(drop=True)
 
         # 숫자 타입 보장
         for col in ['otb_revenue', 'rooms_sold', 'adr', 'occ', 'revpar']:
             if col in df.columns:
                 df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        # ⭐ 중복 날짜 제거 (같은 날이 여러 월 문서에 들어가 있으면 합산되는 것 방지)
+        df = df.drop_duplicates(subset=['date'], keep='last').reset_index(drop=True)
 
         # 양방향 호환 컬럼 (기존 탭이 '입실일자' 참조)
         df['입실일자'] = df['date']
@@ -1395,13 +1420,34 @@ with tab7:
 
         master = normalize_otb_columns(master)
         master = master.dropna(subset=['date'])
+
+        # ⭐ 비정상 날짜 방어 (1970-01-01 등 epoch 파싱 실패 케이스 차단)
+        master = master[master['date'] >= pd.Timestamp('2020-01-01')]
+        master = master[master['date'] <= pd.Timestamp('2030-12-31')]
+
         master['otb_revenue'] = pd.to_numeric(master['otb_revenue'], errors='coerce').fillna(0)
         master['rooms_sold'] = pd.to_numeric(master['rooms_sold'], errors='coerce').fillna(0)
+
+        # ⭐ 중복 날짜 방어 (같은 날짜가 2번 이상 들어오면 합산되어 RN 뻥튀기됨)
+        master = master.groupby('date', as_index=False).agg({
+            'otb_revenue': 'sum',
+            'rooms_sold': 'sum',
+            **({'adr': 'mean'} if 'adr' in master.columns else {}),
+            **({'occ': 'mean'} if 'occ' in master.columns else {}),
+            **({'revpar': 'mean'} if 'revpar' in master.columns else {}),
+        })
+
         master['occ'] = (master['rooms_sold'] / TOTAL_ROOMS) * 100
         master['adr'] = master.apply(lambda x: x['otb_revenue'] / x['rooms_sold'] if x['rooms_sold'] > 0 else 0, axis=1)
 
-        min_d, max_d = master['date'].min().strftime('%Y-%m-%d'), master['date'].max().strftime('%Y-%m-%d')
-        st.success(f"✅ 데이터 로드: **{min_d}** ~ **{max_d}** (총 {len(master):,}일)")
+        if master.empty:
+            st.warning("⚠️ 유효한 날짜 데이터가 없습니다. daily_snapshots의 Date 필드를 확인해주세요.")
+            master = pd.DataFrame({'date': pd.date_range(start=datetime.now().date(), periods=180)})
+            master['date'] = pd.to_datetime(master['date']).dt.normalize()
+        else:
+            min_d = master['date'].min().strftime('%Y-%m-%d')
+            max_d = master['date'].max().strftime('%Y-%m-%d')
+            st.success(f"✅ 데이터 로드: **{min_d}** ~ **{max_d}** (총 {len(master):,}일)")
     else:
         master = pd.DataFrame({'date': pd.date_range(start=datetime.now().date(), periods=180)})
         master['date'] = pd.to_datetime(master['date']).dt.normalize()

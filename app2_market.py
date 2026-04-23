@@ -1413,12 +1413,18 @@ with tab7:
     TOTAL_ROOMS = 128
     if not df_uploaded.empty:
         master = df_uploaded.copy()
+
+        # 🔍 디버그: 원본 상태 추적
+        _debug_steps = []
+        _debug_steps.append(("1. df_uploaded 원본", len(master), list(master.columns)[:10]))
+
         # App3 Stay_Date 호환
         if 'Stay_Date' in master.columns and 'date' not in master.columns:
             master = master.groupby('Stay_Date').agg({'Daily_Rev': 'sum', 'Daily_RN': 'sum'}).reset_index()
             master = master.rename(columns={'Stay_Date': 'date', 'Daily_Rev': 'otb_revenue', 'Daily_RN': 'rooms_sold'})
 
         master = normalize_otb_columns(master)
+        _debug_steps.append(("2. normalize_otb_columns 후", len(master), list(master.columns)[:10]))
 
         # ⭐ 필수 컬럼 보장 (없으면 0으로 생성)
         for col in ['otb_revenue', 'rooms_sold']:
@@ -1426,10 +1432,13 @@ with tab7:
                 master[col] = 0
 
         master = master.dropna(subset=['date'])
+        _debug_steps.append(("3. dropna(date) 후", len(master), ''))
 
         # ⭐ 비정상 날짜 방어 (1970-01-01 등 epoch 파싱 실패 케이스 차단)
         master = master[master['date'] >= pd.Timestamp('2020-01-01')]
         master = master[master['date'] <= pd.Timestamp('2030-12-31')]
+        _debug_steps.append(("4. 날짜 범위 필터(2020~2030) 후", len(master),
+                              f"min={master['date'].min()}, max={master['date'].max()}" if len(master) > 0 else "빈 DF"))
 
         master['otb_revenue'] = pd.to_numeric(master['otb_revenue'], errors='coerce').fillna(0)
         master['rooms_sold'] = pd.to_numeric(master['rooms_sold'], errors='coerce').fillna(0)
@@ -1440,6 +1449,13 @@ with tab7:
         if 'occ' in master.columns: agg_spec['occ'] = 'mean'
         if 'revpar' in master.columns: agg_spec['revpar'] = 'mean'
         master = master.groupby('date', as_index=False).agg(agg_spec)
+        _debug_steps.append(("5. groupby(date) 후", len(master),
+                              f"총 매출={master['otb_revenue'].sum():,.0f}" if len(master) > 0 else "빈 DF"))
+
+        # 🔍 디버그 패널 표시
+        with st.expander("🔍 데이터 처리 디버그 (문제 있을 때 펼쳐서 확인)", expanded=master.empty):
+            for step, cnt, info in _debug_steps:
+                st.caption(f"**{step}**: {cnt}행 / {info}")
 
         if master.empty:
             st.warning("⚠️ 유효한 날짜 데이터가 없습니다. daily_snapshots의 Date 필드를 확인해주세요.")
@@ -1454,7 +1470,7 @@ with tab7:
             master['adr'] = master.apply(lambda x: x['otb_revenue'] / x['rooms_sold'] if x['rooms_sold'] > 0 else 0, axis=1)
             min_d = master['date'].min().strftime('%Y-%m-%d')
             max_d = master['date'].max().strftime('%Y-%m-%d')
-            st.success(f"✅ 데이터 로드: **{min_d}** ~ **{max_d}** (총 {len(master):,}일)")
+            st.success(f"✅ 데이터 로드: **{min_d}** ~ **{max_d}** (총 {len(master):,}일, 매출 {master['otb_revenue'].sum():,.0f}원)")
     else:
         # df_uploaded 비어있을 때도 필수 컬럼 모두 초기화
         master = pd.DataFrame({'date': pd.date_range(start=datetime.now().date(), periods=180)})

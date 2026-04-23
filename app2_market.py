@@ -752,59 +752,44 @@ with tab2:
     st.header("🏨 엠버퓨어힐 OTB 심화 분석 (Deep Dive)")
     st.caption("예약 단위 원본 데이터 기반의 리드타임/채널/ADR 분석")
 
-    # 💡 [핵심] 탭2는 예약 단위 raw를 사용해야 리드타임/거래처 분석이 가능
-    # 세션은 보통 '일자별 요약'이라 적합하지 않음 → 항상 DB의 raw를 우선 사용
+    # 💡 [핵심] 예약 원본을 가져옵니다. (get_db_bookings_only 또는 get_db_bookings_raw 함수 사용)
     df_h_raw = pd.DataFrame()
     with st.spinner("호텔 DB에서 예약 원본 로드 중..."):
-        df_h_raw = get_db_bookings_raw()
+        try:
+            df_h_raw = get_db_bookings_only() # (만약 함수 이름이 다르면 raw로 맞춰주세요)
+        except:
+            pass
 
-    # DB 비었으면 세션 폴백 (예: 업로드한 요약본만 있는 경우)
     if df_h_raw.empty:
         df_h_raw = st.session_state.get('otb_data', pd.DataFrame())
 
     if not df_h_raw.empty:
-        # ⭐ 브릿지 통과
-        df_h_raw = normalize_otb_columns(df_h_raw)
-
+        # 안전한 날짜 변환
         def safe_to_datetime(series):
-            return pd.to_datetime(series, errors='coerce', utc=True)
+            s = pd.to_datetime(series, errors='coerce')
+            if hasattr(s.dt, 'tz') and s.dt.tz is not None: s = s.dt.tz_localize(None)
+            return s.dt.normalize()
 
         # 예약일/체크인 날짜 처리
-        if '예약일자' in df_h_raw.columns:
-            df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['예약일자'])
-        elif '접수일자' in df_h_raw.columns:
-            df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['접수일자'])
-        else:
-            df_h_raw['booking_date'] = pd.NaT
+        if '예약일자' in df_h_raw.columns: df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['예약일자'])
+        elif '접수일자' in df_h_raw.columns: df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['접수일자'])
+        else: df_h_raw['booking_date'] = pd.NaT
 
         df_h_raw['checkin_date'] = safe_to_datetime(df_h_raw['입실일자']) if '입실일자' in df_h_raw.columns else pd.NaT
         df_h_raw['checkout_date'] = safe_to_datetime(df_h_raw['퇴실일자']) if '퇴실일자' in df_h_raw.columns else pd.NaT
 
         # revenue 컬럼
-        if '총금액' in df_h_raw.columns:
-            df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액'], errors='coerce').fillna(0)
-        elif '총금액_숫자' in df_h_raw.columns:
-            df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액_숫자'], errors='coerce').fillna(0)
-        elif 'otb_revenue' in df_h_raw.columns:
-            df_h_raw['revenue'] = pd.to_numeric(df_h_raw['otb_revenue'], errors='coerce').fillna(0)
-        else:
-            df_h_raw['revenue'] = 0
+        if '총금액' in df_h_raw.columns: df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액'], errors='coerce').fillna(0)
+        elif '총금액_숫자' in df_h_raw.columns: df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액_숫자'], errors='coerce').fillna(0)
+        elif 'otb_revenue' in df_h_raw.columns: df_h_raw['revenue'] = pd.to_numeric(df_h_raw['otb_revenue'], errors='coerce').fillna(0)
+        else: df_h_raw['revenue'] = 0
 
         # lead_time / los 계산
-        mask_valid = df_h_raw['booking_date'].notnull() & df_h_raw['checkin_date'].notnull()
-        if mask_valid.any():
-            df_h_raw.loc[mask_valid, 'lead_time'] = (df_h_raw.loc[mask_valid, 'checkin_date'] - df_h_raw.loc[mask_valid, 'booking_date']).dt.days
-        df_h_raw['lead_time'] = df_h_raw.get('lead_time', 0)
-        if 'lead_time' in df_h_raw.columns:
-            df_h_raw['lead_time'] = df_h_raw['lead_time'].fillna(0)
+        df_h_raw['lead_time'] = (df_h_raw['checkin_date'] - df_h_raw['booking_date']).dt.days
+        df_h_raw['lead_time'] = df_h_raw['lead_time'].fillna(0)
 
-        mask_los = df_h_raw['checkin_date'].notnull() & df_h_raw['checkout_date'].notnull()
-        if mask_los.any():
-            df_h_raw.loc[mask_los, 'los'] = (df_h_raw.loc[mask_los, 'checkout_date'] - df_h_raw.loc[mask_los, 'checkin_date']).dt.days
-        if 'los' in df_h_raw.columns:
-            df_h_raw['los'] = df_h_raw['los'].fillna(1)
-        else:
-            df_h_raw['los'] = 1
+        df_h_raw['los'] = (df_h_raw['checkout_date'] - df_h_raw['checkin_date']).dt.days
+        df_h_raw['los'] = df_h_raw['los'].fillna(1)
 
         df_h_raw['checkin_month'] = df_h_raw['checkin_date'].dt.strftime('%Y-%m')
         df_h_raw['checkin_day'] = df_h_raw['checkin_date'].dt.day_name()
@@ -822,12 +807,7 @@ with tab2:
 
         col_d1, col_d2 = st.columns([2, 1])
         with col_d1:
-            sel_dates = st.date_input(
-                "체크인 기간 선택",
-                value=(d_start, d_end),
-                min_value=min_dt.date() if pd.notnull(min_dt) else None,
-                max_value=max_dt.date() if pd.notnull(max_dt) else None
-            )
+            sel_dates = st.date_input("체크인 기간 선택", value=(d_start, d_end), min_value=min_dt.date() if pd.notnull(min_dt) else None, max_value=max_dt.date() if pd.notnull(max_dt) else None)
 
         if isinstance(sel_dates, tuple):
             if len(sel_dates) == 2: s_date, e_date = sel_dates
@@ -836,22 +816,28 @@ with tab2:
         else:
             s_date = e_date = sel_dates
 
-        mask_period = (df_h_raw['checkin_date'].dt.date >= s_date) & (df_h_raw['checkin_date'].dt.date <= e_date)
+        s_ts = pd.Timestamp(s_date)
+        e_ts = pd.Timestamp(e_date)
+        mask_period = (df_h_raw['checkin_date'] >= s_ts) & (df_h_raw['checkin_date'] <= e_ts)
         df_h = df_h_raw[mask_period].copy()
+        
         st.info(f"기간 (**{s_date} ~ {e_date}**) 예약 데이터 **{len(df_h):,}건** 분석")
         st.markdown("---")
 
         if not df_h.empty:
+            # ==============================================================
+            # 💡 1. 계산 파트 (화면에 그리기 전에 변수를 먼저 싹 다 계산합니다!)
+            # ==============================================================
             total_bk = len(df_h) # 예약 건수
             total_rev = df_h['revenue'].sum()  # 총금액 합계
 
-            # ⭐ 1. 객실료 합계 (순수 객실 매출)
+            # ⭐ 객실료 합계 (순수 객실 매출)
             if '객실료' in df_h.columns:
                 room_rev = pd.to_numeric(df_h['객실료'], errors='coerce').fillna(0).sum()
             else:
                 room_rev = total_rev
 
-            # ⭐ 2. RoomNight = 박수 × 객실수 (정확한 ADR 분모)
+            # ⭐ RoomNight = 박수 × 객실수 (정확한 ADR 분모)
             if '박수' in df_h.columns and '객실수' in df_h.columns:
                 df_h['room_nights'] = (
                     pd.to_numeric(df_h['박수'], errors='coerce').fillna(1) *
@@ -863,27 +849,33 @@ with tab2:
             else:
                 total_rn = total_bk
 
-            # ⭐ 3. 조식 포함 비중 계산
+            # ⭐ 조식 비중 계산
             if 'is_breakfast' in df_h.columns:
                 bf_count = df_h['is_breakfast'].sum()
                 bf_ratio = (bf_count / total_bk * 100) if total_bk > 0 else 0
             else:
                 bf_count, bf_ratio = 0, 0
 
-            # ⭐ 4. 파생 변수 최종 계산 (화면 출력 전 필수!)
+            # ⭐ ADR 및 리드타임 최종 계산
             adr_total = total_rev / total_rn if total_rn > 0 else 0        # 총금액 기준 ADR
             adr_room  = room_rev  / total_rn if total_rn > 0 else 0        # 객실료 기준 ADR
             avg_lead  = df_h['lead_time'].mean() if 'lead_time' in df_h.columns else 0
 
-            # 💡 5. 화면 출력 (중복 없이 5칸으로 깔끔하게 통합!)
+            # ==============================================================
+            # 💡 2. 화면 출력 파트 (위에서 계산한 변수를 5칸으로 깔끔하게 출력)
+            # ==============================================================
             k1, k2, k3, k4, k5 = st.columns(5)
             k1.metric("기간 총 매출", f"{int(total_rev):,}원", f"객실료 {int(room_rev):,}원")
             k2.metric("예약건수 / RN", f"{total_bk:,}건", f"{int(total_rn):,} RN")
             k3.metric("ADR(총금액)", f"{int(adr_total):,}원")
             k4.metric("ADR(객실료)", f"{int(adr_room):,}원", f"리드타임 {avg_lead:.1f}일")
-            k5.metric("조식 포함", f"{bf_ratio:.1f}%", f"{int(bf_count)}건")
+            k5.metric("조식 포함 비중", f"{bf_ratio:.1f}%", f"{int(bf_count)}건")
 
             st.markdown("---")
+            
+            # ==============================================================
+            # 💡 3. 차트 파트 (Booking Pace, 채널 등)
+            # ==============================================================
             st.subheader("📈 Booking Pace")
             target_months = df_h['checkin_month'].unique()
             df_pace_chart = df_h[df_h['checkin_month'].isin(target_months)].copy()
@@ -905,11 +897,8 @@ with tab2:
                     labels = ['DayOf', '0-3일', '4-7일', '8-14일', '15-30일', '31-60일', '61-90일', '90-180일', '180일+']
                     df_h['lead_grp'] = pd.cut(df_h['lead_time'], bins=bins, labels=labels)
 
-                    # ⭐ ADR = 객실료 합계 ÷ RoomNight 합계 (그룹별)
                     def grp_adr(g):
-                        rn = (g['room_nights'].sum() if 'room_nights' in g.columns
-                              else g['박수'].sum() if '박수' in g.columns
-                              else len(g))
+                        rn = (g['room_nights'].sum() if 'room_nights' in g.columns else g['박수'].sum() if '박수' in g.columns else len(g))
                         rev = g['객실료'].sum() if '객실료' in g.columns else g['revenue'].sum()
                         return rev / rn if rn > 0 else 0
 
@@ -936,7 +925,6 @@ with tab2:
                     top_ch = df_h['거래처'].value_counts().nlargest(10).index
                     df_h['channel_sim'] = df_h['거래처'].apply(lambda x: x if x in top_ch else '기타')
 
-                    # ⭐ 채널별: 총금액 합계 + 객실료 ADR
                     def ch_adr(g):
                         rn = g['room_nights'].sum() if 'room_nights' in g.columns else len(g)
                         rev = g['객실료'].sum() if '객실료' in g.columns else g['revenue'].sum()
@@ -968,8 +956,7 @@ with tab2:
                 st.plotly_chart(fig_heat, use_container_width=True)
     else:
         st.warning("분석할 예약 데이터가 없습니다. 사이드바에서 파일 업로드 또는 클라우드에서 로드하세요.")
-
-
+       
 # =============================================================================
 # TAB 3: 경쟁사 비교
 # =============================================================================

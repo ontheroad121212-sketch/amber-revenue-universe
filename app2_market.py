@@ -593,7 +593,7 @@ with tab2:
         df_h_raw = normalize_otb_columns(df_h_raw)
 
         def safe_to_datetime(series):
-            return pd.to_datetime(series, errors='coerce', utc=True)
+            return pd.to_datetime(series, errors='coerce').dt.tz_localize(None).dt.normalize()
 
         # 예약일/체크인 날짜 처리
         if '예약일자' in df_h_raw.columns:
@@ -662,7 +662,11 @@ with tab2:
         else:
             s_date = e_date = sel_dates
 
-        mask_period = (df_h_raw['checkin_date'].dt.date >= s_date) & (df_h_raw['checkin_date'].dt.date <= e_date)
+        # 판다스 Timestamp로 포맷을 완벽히 일치시켜 NaT 에러 방지
+        s_ts = pd.Timestamp(s_date)
+        e_ts = pd.Timestamp(e_date)
+
+        mask_period = (df_h_raw['checkin_date'] >= s_ts) & (df_h_raw['checkin_date'] <= e_ts)
         df_h = df_h_raw[mask_period].copy()
         st.info(f"기간 (**{s_date} ~ {e_date}**) 예약 데이터 **{len(df_h):,}건** 분석")
         st.markdown("---")

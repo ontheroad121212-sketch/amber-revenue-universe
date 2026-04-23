@@ -311,50 +311,61 @@ def get_db_bookings_raw():
     hotel_bookings 컬렉션 원본 반환 (예약 1건 = 1row).
     """
     try:
-        if not db_hotel:
-            return pd.DataFrame()
+        if not db_hotel: return pd.DataFrame()
         docs = db_hotel.collection('hotel_bookings').stream()
         data = [d.to_dict() for d in docs]
-        if not data:
-            return pd.DataFrame()
+        if not data: return pd.DataFrame()
         df = pd.DataFrame(data)
 
-        # ==============================================================
-        # 🚀 1. 중복 데이터 완벽 제거 (단체/단체멤버 중복 다운로드 방어)
-        # ==============================================================
+        # 1. 예약번호 필수 필터 (가짜 요약본 차단)
         if '예약번호' in df.columns:
-            # 1) 예약번호가 없는 가짜/빈 데이터 제거
             df = df[df['예약번호'].notna() & (df['예약번호'].astype(str).str.strip() != '')]
-            # 2) 예약번호가 똑같은 데이터가 여러 개면 가장 처음 1개만 남기고 싹 다 버림! (중복 카운팅 해결)
             df = df.drop_duplicates(subset=['예약번호'], keep='first')
 
-        # ── 날짜 컬럼 ──
+        # 2. 날짜 및 숫자 변환
         for date_col in ['입실일자', '퇴실일자', '예약일자', '확인일자', '취소일자']:
             if date_col in df.columns:
-                df[date_col] = pd.to_datetime(
-                    df[date_col], errors='coerce', utc=True
-                ).dt.tz_localize(None).dt.normalize()
+                df[date_col] = pd.to_datetime(df[date_col], errors='coerce', utc=True).dt.tz_localize(None).dt.normalize()
 
-        # ── 금액 컬럼 ──
         for rev_col in ['총금액', '객실료', '객단가', '서비스료']:
             if rev_col in df.columns:
-                df[rev_col] = pd.to_numeric(
-                    df[rev_col].astype(str).str.replace(',', '').str.strip(),
-                    errors='coerce'
-                ).fillna(0)
+                df[rev_col] = pd.to_numeric(df[rev_col].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0)
 
-        # ── 정수 컬럼 ──
         for int_col in ['객실수', '박수']:
             if int_col in df.columns:
                 df[int_col] = pd.to_numeric(df[int_col], errors='coerce').fillna(0)
 
         # ==============================================================
-        # 🚀 2. 취소 예약 완벽 제거 (팀장님 지시: RC 코드 추가!)
+        # 🚀 3. 취소 예약 '이중 철통 방어' (상태코드 + 취소일자 교차 검증)
         # ==============================================================
         if '상태' in df.columns:
-            df = df[~df['상태'].astype(str).str.contains('CXL|취소|Cancel|RC', case=False, na=False)]
+            # PMS 취소/노쇼 코드 총망라
+            df = df[~df['상태'].astype(str).str.contains('CX|NS|CXL|취소|Cancel|RC', case=False, na=False)]
+        
+        if '취소일자' in df.columns:
+            # 💡 상태코드와 무관하게 '취소일자'에 날짜가 적혀있으면 100% 취소건이므로 무조건 삭제!
+            # (.isna() 인 데이터 = 취소일자가 비어있는 진짜 확정 예약만 남김)
+            df = df[df['취소일자'].isna()]
 
-        # ── 조식 마킹 ──
+        # ==============================================================
+        # 🚀 4. 단체(Master) / 멤버 중복 뻥튀기 완벽 제거
+        # ==============================================================
+        # '단체'와 '단체멤버'가 같이 섞여 있으면 박수(RN)가 정확히 2배가 됩니다.
+        # 전체 텍스트 컬럼을 뒤져서 '단체'라고 명시된 마스터 예약 행만 족집게처럼 찾아내 삭제합니다.
+        found_col = False
+        for col in df.select_dtypes(include=['object']).columns:
+            vals = df[col].astype(str).str.strip()
+            if vals.isin(['단체멤버']).any():
+                df = df[vals != '단체']  # '단체'(마스터) 삭제, '단체멤버'는 유지
+                found_col = True
+                break
+                
+        if not found_col:
+            # 명시된 컬럼을 못 찾았을 경우 전체 셀을 스캔하여 '단체'를 삭제
+            mask_master = df.apply(lambda row: row.astype(str).str.strip().eq('단체').any(), axis=1)
+            df = df[~mask_master]
+
+        # 5. 조식 마킹
         if '서비스코드' in df.columns:
             df['is_breakfast'] = df['서비스코드'].astype(str).str.lower().str.contains('bf', na=False)
         else:
@@ -365,7 +376,6 @@ def get_db_bookings_raw():
     except Exception as e:
         st.warning(f"⚠️ get_db_bookings_raw 오류: {e}")
         return pd.DataFrame()
-
 
 @st.cache_data(ttl=600)
 def get_db_bookings_only():

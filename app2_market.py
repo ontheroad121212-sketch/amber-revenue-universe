@@ -378,7 +378,7 @@ def get_db_bookings_raw():
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
     """
-    hotel_bookings를 '입실일자별 집계'로 반환.
+    hotel_bookings(순수 PMS 원본)를 '입실일자별 집계'로 반환.
     실제 필드 기반: 총금액(매출), 박수(RN) 사용.
     표준 스키마: date / otb_revenue / rooms_sold
     """
@@ -408,7 +408,6 @@ def get_db_bookings_only():
             agg_dict['객실수'] = 'sum'
 
         if not agg_dict:
-            st.warning("⚠️ 집계할 금액/박수 컬럼 없음")
             return pd.DataFrame()
 
         daily = raw.groupby('입실일자').agg(agg_dict).reset_index()
@@ -424,12 +423,6 @@ def get_db_bookings_only():
             daily = daily.rename(columns={'객실수': 'rooms_sold'})
         else:
             daily['rooms_sold'] = 0
-
-        # 양방향 호환 컬럼 추가
-        try:
-            daily = normalize_otb_columns(daily)
-        except:
-            pass
             
         return daily.sort_values('date').reset_index(drop=True)
 
@@ -440,8 +433,8 @@ def get_db_bookings_only():
 
 def save_otb_to_firebase(df):
     """
-    온북 DF를 db_hotel의 hotel_bookings 컬렉션에 저장.
-    ⭐ doc_id를 'otb_YYYYMMDD'로 고정 → 같은 날짜 재업로드 시 덮어쓰기.
+    사이드바에서 업로드한 요약 OTB 엑셀을 저장.
+    ⭐ [핵심] 원본 PMS 데이터와 섞이지 않도록 'hotel_summary_otb'라는 별도 폴더에 격리 저장!
     """
     if not db_hotel:
         return False, "DB 연결 없음"
@@ -457,34 +450,36 @@ def save_otb_to_firebase(df):
                 if pd.isna(d_value):
                     continue
                 
-                # 💡 [에러 원천 차단] DB에 넣을 때 시간대 꼬리표를 떼고 저장!
-                d_value = pd.to_datetime(d_value, errors='coerce', utc=True).tz_localize(None)
-                if pd.isna(d_value): continue
+                # 💡 [에러 원천 차단] DB에 넣을 때 시간대 꼬리표를 완벽히 떼고 문자열로 저장
+                d_ts = pd.to_datetime(d_value, errors='coerce')
+                if pd.isna(d_ts): continue
                 
-                # isoformat() 대신 깔끔한 'YYYY-MM-DD' 포맷 사용
-                date_str = d_value.strftime('%Y-%m-%d') 
-                doc_id = f"otb_{d_value.strftime('%Y%m%d')}"
+                if d_ts.tzinfo is not None:
+                    d_ts = d_ts.tz_convert('UTC').tz_localize(None)
+                d_ts = d_ts.normalize()
+                
+                date_str = d_ts.strftime('%Y-%m-%d') 
+                doc_id = f"otb_{d_ts.strftime('%Y%m%d')}"
 
                 payload = {
                     'date': date_str,
-                    '입실일자': date_str,
                     'otb_revenue': float(row.get('otb_revenue', 0)),
-                    '총금액_숫자': float(row.get('otb_revenue', 0)),
-                    '총금액': float(row.get('otb_revenue', 0)),
                     'rooms_sold': float(row.get('rooms_sold', 0)),
-                    '객실수': float(row.get('rooms_sold', 0)),
-                    '박수': float(row.get('rooms_sold', 0)),
                     'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
-                batch.set(db_hotel.collection('hotel_bookings').document(doc_id), payload)
+                
+                # 🚨 hotel_bookings(원본)가 아닌 hotel_summary_otb(요약본) 컬렉션에 저장합니다.
+                batch.set(db_hotel.collection('hotel_summary_otb').document(doc_id), payload)
                 count += 1
+                
                 if count % 400 == 0:
                     batch.commit()
                     batch = db_hotel.batch()
             except Exception:
                 continue
+                
         batch.commit()
-        return True, f"{count}건 저장"
+        return True, f"{count}건 요약본 별도 보관 완료"
     except Exception as e:
         return False, str(e)
 # =============================================================================

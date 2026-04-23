@@ -231,15 +231,29 @@ st.title("🚀 2026 비상: 시크릿 전략 페이지")
 st.markdown("---")
 
 # 2️⃣ 여기는 '사이드바' 영역입니다 (왼쪽 메뉴)
-with st.sidebar:
-    st.header("📂 데이터 사령부")
-    uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
+# 💡 [핵심] APP3(또는 메모리)에 이미 저장된 데이터가 있는지 확인 (키 이름을 'otb_data'로 통일)
+shared_data = st.session_state.get('otb_data', pd.DataFrame())
+
+if not shared_data.empty:
+    # APP3에서 올린 데이터가 이미 있다면 업로드 창을 숨기고 연동 완료 메시지 출력!
+    st.success("🔗 APP3(전략 사령부)의 데이터를 자동으로 연동했습니다!")
+    st.info(f"✅ 총 {len(shared_data):,}일치 데이터 로드 됨")
     
+    # 그래도 수동으로 파일을 올리고 싶을 때를 대비한 숨김 창
+    with st.expander("🔄 파일 수동 덮어쓰기"):
+        uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
+        if uploaded_files:
+            parsed_df = parse_uploaded_files(uploaded_files)
+            if not parsed_df.empty:
+                st.session_state['otb_data'] = parsed_df
+                st.success("✅ 새 데이터로 덮어쓰기 완료! 새로고침을 눌러주세요.")
+else:
+    # 연동된 데이터가 없을 때는 평소처럼 업로드 창 표시
+    uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
     if uploaded_files:
         parsed_df = parse_uploaded_files(uploaded_files)
         if not parsed_df.empty:
-            # 아까 변경하신 세션 변수명(viva_otb_data 등)이 있다면 그 이름으로 맞춰주세요!
-            st.session_state['viva_otb_data'] = parsed_df
+            st.session_state['otb_data'] = parsed_df  # 열쇠 이름을 'otb_data'로 완벽 통일
             st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
     
     st.markdown("---")

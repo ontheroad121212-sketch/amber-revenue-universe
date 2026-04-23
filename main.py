@@ -29,16 +29,24 @@ def check_password():
     return True
 
 # 3. 로그인 성공 시에만 네비게이션 메뉴 실행
+# main.py의 하단부 수정
 if check_password():
-    # 페이지(메뉴) 정의
-    page1 = st.Page("app1_command.py", title="Command Center v8.0", icon="🏨")
-    page2 = st.Page("app2_market.py", title="Market Intelligence", icon="⚔️")
-    page3 = st.Page("app3_secret.py", title="Secret Strategy Lab", icon="🚀")
+    st.sidebar.markdown("""
+    <div style='background:#1E3C72; padding:15px; border-radius:10px; color:white; margin-bottom:20px;'>
+        <b>🧭 엠버 레비뉴 가이드</b><br><br>
+        1️⃣ <b>Command Center:</b> 오늘 가격을 어떻게 바꿀지 결정하고 조치할 때<br><br>
+        2️⃣ <b>Market Intel:</b> 경쟁사, 항공권 등 외부 시장 흐름을 읽을 때<br><br>
+        3️⃣ <b>Secret Lab:</b> 백업 및 복원, 시뮬레이션 데이터를 검증할 때
+    </div>
+    """, unsafe_allow_html=True)
 
-    # 네비게이션 사이드바 생성 및 실행
+    # 페이지(메뉴) 정의
+    page1 = st.Page("app1_command.py", title="1. Command Center", icon="🏨")
+    page2 = st.Page("app2_market.py", title="2. Market Intelligence", icon="⚔️")
+    page3 = st.Page("app3_secret.py", title="3. Secret Strategy Lab", icon="🚀")
+
     pg = st.navigation({
         "메인 시스템": [page1],
         "시장 및 전략 분석": [page2, page3]
     })
-
     pg.run()

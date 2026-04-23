@@ -988,7 +988,8 @@ FACT_DB_GLOBAL = {
 for m_fact in FACT_DB_GLOBAL:
     if m_fact in FACT_DB_GLOBAL and FACT_DB_GLOBAL[m_fact]:
         max_v = max(FACT_DB_GLOBAL[m_fact].values())
-        if max_v > yearly_data_store[m_fact]['rev']:
+        # 파일에서 읽어온 데이터가 아예 없을 때만 하드코딩 데이터 사용
+        if yearly_data_store[m_fact]['rev'] == 0:
             yearly_data_store[m_fact]['rev'] = max_v
 
 # ==========================================

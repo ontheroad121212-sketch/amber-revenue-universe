@@ -232,50 +232,42 @@ st.markdown("---")
 
 # 2️⃣ 여기는 '사이드바' 영역입니다 (왼쪽 메뉴)
 with st.sidebar:
-    st.header("📂 데이터 사령부")
+    st.header("🏨 호텔 데이터 사령부")
+    st.caption("amber-otb-pickup (Hotel DB) 연동 중")
 
-    # [1] 데이터 저장소 초기화
-    if 'otb_data' not in st.session_state:
-        st.session_state['otb_data'] = pd.DataFrame()
-
-    # [2] 🔥 클라우드 자동 동기화 로직 (APP3에서 올린 최신 데이터 연동)
-    if st.session_state['otb_data'].empty and db_flight:
-        try:
-            latest_docs = db_flight.collection("amber_snapshots").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(1).get()
-            if latest_docs:
-                d = latest_docs[0].to_dict()
-                pms_raw = d.get('pms_data')
-                if pms_raw:
-                    import io
-                    st.session_state['otb_data'] = pd.read_json(io.StringIO(pms_raw), orient='split')
-                    st.success(f"☁️ 클라우드 최신 데이터 동기화 완료\n({d.get('save_name')})")
-        except Exception as e:
-            st.warning(f"자동 동기화 중 오류(무시 가능): {e}")
-
-    # [3] 화면 표시 및 수동 업로드 기능
-    if not st.session_state['otb_data'].empty:
-        st.success("🔗 APP3(전략 사령부)의 데이터를 자동으로 연동했습니다!")
-        st.info(f"✅ 총 {len(st.session_state['otb_data']):,}일치 데이터 로드 됨")
-        
-        with st.expander("🔄 데이터 수동 덮어쓰기 (파일 업로드)"):
-            uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True, key="manual_up")
-            if uploaded_files:
-                parsed_df = parse_uploaded_files(uploaded_files)
-                if not parsed_df.empty:
-                    st.session_state['otb_data'] = parsed_df
-                    st.success("✅ 파일 데이터로 교체 완료!")
-                    st.rerun()
-    else:
-        uploaded_files = st.file_uploader("월별 온북 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True, key="first_up")
-        if uploaded_files:
-            parsed_df = parse_uploaded_files(uploaded_files)
-            if not parsed_df.empty:
-                st.session_state['otb_data'] = parsed_df
-                st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
-                st.rerun()
+    # [1] 파일 업로드 기능
+    uploaded_files = st.file_uploader("월별 OTB 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
+    
+    if uploaded_files:
+        parsed_df = parse_uploaded_files(uploaded_files)
+        if not parsed_df.empty:
+            st.session_state['otb_data'] = parsed_df
+            st.success(f"✅ {len(parsed_df)}건 로드 완료")
+            
+            # 🔥 [추가] 호텔 클라우드(Firebase Hotel)에 즉시 저장 버튼
+            if st.button("📤 이 데이터를 호텔 클라우드에 영구 저장", use_container_width=True):
+                if db_hotel:
+                    with st.spinner("호텔 DB 업로드 중..."):
+                        try:
+                            # 기존 데이터와 섞이지 않게 'hotel_bookings' 컬렉션에 한 줄씩 저장
+                            # (실무용: 대량 업로드 시에는 batch 사용 권장)
+                            batch = db_hotel.batch()
+                            for _, row in parsed_df.iterrows():
+                                # 날짜를 ID로 쓰거나 유니크 키 생성
+                                doc_id = f"{row['date'].strftime('%Y%m%d')}_{np.random.randint(1000,9999)}"
+                                doc_ref = db_hotel.collection("hotel_bookings").document(doc_id)
+                                # 저장용 딕셔너리 변환
+                                data_to_save = row.to_dict()
+                                data_to_save['date'] = data_to_save['date'].isoformat() # 날짜 직렬화
+                                batch.set(doc_ref, data_to_save)
+                            batch.commit()
+                            st.success("🚀 호텔 클라우드 저장 성공!")
+                            st.cache_data.clear() # 저장 후 클라우드 데이터를 다시 읽어오기 위해 캐시 삭제
+                        except Exception as e:
+                            st.error(f"저장 실패: {e}")
 
     st.markdown("---")
-    if st.button("🔄 시스템 전체 새로고침", use_container_width=True):
+    if st.button("🔄 클라우드 데이터 강제 동기화", use_container_width=True):
         st.cache_data.clear()
         st.rerun()
 
@@ -299,7 +291,7 @@ with st.sidebar:
 
     if all_search_dates:
         selected_global_date = st.selectbox("조회할 크롤링 수집일 선택", all_search_dates, index=0)
-        st.session_state['global_search_date'] = selected_global_date
+        st.session_state['global_search_date'] = st.selectbox("시장 데이터 기준일", sorted(df_f_side['search_date_str'].unique(), reverse=True)) if not df_f_side.empty else "-"
     else:
         st.session_state['global_search_date'] = "-"
         st.info("수집된 크롤링 데이터가 없습니다.")
@@ -450,6 +442,19 @@ with tab1:
 with tab2:
     st.header("🏨 엠버퓨어힐 OTB 심화 분석 (Deep Dive)")
     st.caption("실시간 예약 DB(Firebase)를 연동하여, 선택한 기간의 예약 속도(Pace)와 퀄리티를 입체적으로 분석합니다.")
+
+    # 💡 [핵심 로직] 세션에 데이터가 없으면 클라우드(hotel_app)에서 직접 긁어옵니다.
+    if 'otb_data' not in st.session_state or st.session_state['otb_data'].empty:
+        with st.spinner("호텔 클라우드(amber-otb-pickup)에서 데이터를 가져오는 중..."):
+            cloud_df = get_db_bookings_only() # 이 함수는 db_hotel(호텔 프로젝트)을 씁니다.
+            if not cloud_df.empty:
+                # 함수 내부 컬럼명(입실일자 등)을 분석용 컬럼명(date, revenue)으로 변환
+                cloud_df = cloud_df.rename(columns={
+                    '입실일자': 'date', 
+                    '총금액_숫자': 'revenue',
+                    '박수': 'rooms_sold' # 실제 컬럼명에 맞춰 조정 필요
+                })
+                st.session_state['otb_data'] = cloud_df
 
     with st.spinner("예약 데이터를 불러와 필드를 매핑 중입니다..."):
         df_h_raw = get_db_bookings_only()

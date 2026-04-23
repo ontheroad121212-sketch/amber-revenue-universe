@@ -33,7 +33,7 @@ if 'otb_data' not in st.session_state:
     st.session_state['otb_data'] = pd.DataFrame()
 
 # =============================================================================
-# 2. 🔥 Firebase 표준 초기화 (3개 DB)
+# 2. 🔥 Firebase 표준 초기화 (3개 DB 명확하게 강제 지정)
 # =============================================================================
 def _init_firebase_app(app_name, secret_key):
     existing = [a.name for a in firebase_admin._apps.values()] if firebase_admin._apps else []
@@ -48,24 +48,24 @@ def _init_firebase_app(app_name, secret_key):
         cred = credentials.Certificate(secret_dict)
         return firebase_admin.initialize_app(cred, name=app_name)
     except Exception as e:
-        st.error(f"❌ {app_name} ({secret_key}) 초기화 실패: {e}")
         return None
 
-def _get_client(app_instance):
-    if not app_instance:
-        return None
-    try:
-        return firestore.client(app=app_instance)
-    except Exception:
-        return None
-
-app_hotel  = _init_firebase_app("hotel_app",  "firebase_hotel")
+# 1) 각 프로젝트 앱 인스턴스 생성
+# ⚠️ 주의: [firebase_hotel]이 'amber-otb-pickup' 프로젝트여야 합니다!
+app_hotel  = _init_firebase_app("hotel_app",  "firebase_hotel") 
 app_flight = _init_firebase_app("flight_app", "firebase_flight")
 app_rate   = _init_firebase_app("rate_app",   "firebase")
 
-db_hotel  = _get_client(app_hotel)   # amber-otb-pickup (온북 저장소)
-db_flight = _get_client(app_flight)  # viva2026 (크롤링/스냅샷)
-db_rate   = _get_client(app_rate)    # amber-rate (요금 에디터 참조)
+# 2) 클라이언트 변수 할당 (여기서 변수가 꼬이지 않게 'app_instance'를 정확히 매칭)
+db_hotel  = firestore.client(app=app_hotel)  if app_hotel  else None # ⭐ 진짜 데이터 집
+db_flight = firestore.client(app=app_flight) if app_flight else None # ✈️ 항공/렌터카 집
+db_rate   = firestore.client(app=app_rate)   if app_rate   else None # 💰 요금 편집용 빈집
+
+# 💡 [검증] 지금 바로 db_hotel이 제대로 연결되었는지 화면에 강제 출력!
+if db_hotel:
+    st.sidebar.success(f"🏠 현재 데이터 집: {app_hotel.project_id}")
+else:
+    st.sidebar.error("🚨 호텔 DB(firebase_hotel) 연결에 실패했습니다!")
 
 
 # =============================================================================
@@ -285,24 +285,44 @@ def get_tourist_data_only():
 
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
+    if not db_hotel: return pd.DataFrame()
+    
     try:
-        if not app_hotel or not db_hotel:
-            st.error("🚨 DB 연결 자체가 실패했습니다. secrets.toml을 확인하세요.")
-            return pd.DataFrame()
+        # 이제 진짜 'amber-otb-pickup' 프로젝트의 컬렉션을 뒤집니다.
+        docs = db_hotel.collection('hotel_bookings').stream()
+        data = [d.to_dict() for d in docs]
+        
+        if not data: # 만약 hotel_bookings가 비어있다면 integrity_history를 예비로 스캔
+            docs = db_hotel.collection('revenue_integrity_history').stream()
+            data = []
+            for doc in docs:
+                d = doc.to_dict()
+                # 리스트 형태면 풀어서, 아니면 그대로 추가
+                found = False
+                for k, v in d.items():
+                    if isinstance(v, list): data.extend(v); found = True
+                if not found: data.append(d)
 
-        # 1. 현재 접속한 프로젝트 ID 출력
-        proj_id = app_hotel.project_id
-        st.error(f"🔑 **[접속 추적]** 현재 앱이 문을 연 파이어베이스 프로젝트: **{proj_id}**")
+        df = pd.DataFrame(data)
         
-        # 2. 그 프로젝트 안에 있는 폴더(컬렉션) 목록 전부 출력
-        cols = [c.id for c in db_hotel.collections()]
-        st.warning(f"📁 **[폴더 스캔]** 이 프로젝트 안에 실제로 있는 폴더들: {cols}")
-        
+        if not df.empty:
+            # 💡 표준화 브릿지
+            if 'date' in df.columns and '입실일자' not in df.columns: df['입실일자'] = df['date']
+            if 'otb_revenue' in df.columns and '총금액_숫자' not in df.columns: df['총금액_숫자'] = df['otb_revenue']
+            
+            for col in ['입실일자', '접수일자', '예약일자']:
+                if col in df.columns:
+                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
+            
+            if '총금액' in df.columns: 
+                df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
+            elif '총금액_숫자' in df.columns:
+                df['총금액_숫자'] = pd.to_numeric(df['총금액_숫자'], errors='coerce').fillna(0)
+                
+        return df
     except Exception as e:
-        st.error(f"스캔 중 에러 발생: {e}")
-        
-    return pd.DataFrame()
-
+        st.error(f"데이터 로드 중 에러: {e}")
+        return pd.DataFrame()
 
 def save_otb_to_firebase(df):
     """

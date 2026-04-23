@@ -973,8 +973,11 @@ def render_note_input(key_id, label="메모", notes=None, show_tag=True, widget_
                                     height=80, placeholder="예: 총지배인 지시로 유지 / 단체예약 / 다시 확인")
     if show_tag and col2:
         with col2:
-            tag_options = ['일반', '의사결정', '경고', '대기']
-            new_tag = st.selectbox("태그", tag_options,
+            tag_options = [
+                '일반', '의사결정', '대기', 
+                '개입: 단체블럭 대기', '개입: 경쟁사 방어', '개입: 프로모션', '개입: 취소 우려'
+            ]
+            new_tag = st.selectbox("메모 분류 (수동 개입 사유)", tag_options,
                 index=tag_options.index(existing_tag) if existing_tag in tag_options else 0,
                 key=f"note_tag_{unique_key}")
     else:

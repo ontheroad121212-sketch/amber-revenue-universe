@@ -822,13 +822,23 @@ with tab2:
         if not df_h.empty:
             total_rev = df_h['revenue'].sum()
             total_bk = len(df_h)
-            adr = total_rev / total_bk if total_bk > 0 else 0
+
+            # ⭐ ADR = 총금액 합계 ÷ 박수 합계 (예약건수로 나누면 2박짜리가 과대계산됨)
+            if '박수' in df_h.columns:
+                total_nights = df_h['박수'].sum()
+                adr = total_rev / total_nights if total_nights > 0 else 0
+                adr_label = "평균 객단가 (ADR/박)"
+            else:
+                adr = total_rev / total_bk if total_bk > 0 else 0
+                adr_label = "평균 객단가 (ADR/건)"
+
             avg_lead = df_h['lead_time'].mean() if 'lead_time' in df_h.columns else 0
+            total_nights_display = int(df_h['박수'].sum()) if '박수' in df_h.columns else total_bk
 
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("기간 총 매출", f"{int(total_rev):,}원")
-            k2.metric("기간 예약 건수", f"{total_bk:,}건")
-            k3.metric("평균 객단가 (ADR)", f"{int(adr):,}원")
+            k2.metric("기간 예약 건수", f"{total_bk:,}건 ({total_nights_display:,}박)")
+            k3.metric(adr_label, f"{int(adr):,}원")
             k4.metric("평균 리드타임", f"{avg_lead:.1f}일")
 
             st.markdown("---")

@@ -876,14 +876,22 @@ with tab7:
     TOTAL_ROOMS = 128
     if not df_uploaded.empty:
         master = df_uploaded.copy()
-        master['date'] = pd.to_datetime(master['date']).dt.tz_localize(None).dt.normalize()
+        
+        # 💡 [핵심 브릿지] APP3 데이터(Stay_Date)가 들어오면 APP2(date)용으로 자동 번역 및 압축!
+        if 'Stay_Date' in master.columns and 'date' not in master.columns:
+            master = master.groupby('Stay_Date').agg({'Daily_Rev': 'sum', 'Daily_RN': 'sum'}).reset_index()
+            master = master.rename(columns={'Stay_Date': 'date', 'Daily_Rev': 'otb_revenue', 'Daily_RN': 'rooms_sold'})
+            
+        master['date'] = pd.to_datetime(master['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+        master = master.dropna(subset=['date']) # 안전장치: 빈 날짜 제거
+        
         master['otb_revenue'] = pd.to_numeric(master['otb_revenue'], errors='coerce').fillna(0)
         master['rooms_sold'] = pd.to_numeric(master['rooms_sold'], errors='coerce').fillna(0)
         master['occ'] = (master['rooms_sold'] / TOTAL_ROOMS) * 100
         master['adr'] = master.apply(lambda x: x['otb_revenue'] / x['rooms_sold'] if x['rooms_sold'] > 0 else 0, axis=1)
         
         min_d, max_d = master['date'].min().strftime('%Y-%m-%d'), master['date'].max().strftime('%Y-%m-%d')
-        st.success(f"✅ 데이터 로드 성공: **{min_d}** 부터 **{max_d}** 까지 (총 {len(master):,}일)")
+        st.success(f"✅ APP3 통합 데이터 자동 변환 성공: **{min_d}** 부터 **{max_d}** 까지 (총 {len(master):,}일)")
     else:
         master = pd.DataFrame({'date': pd.date_range(start=datetime.now().date(), periods=180)})
         master['date'] = pd.to_datetime(master['date']).dt.normalize()

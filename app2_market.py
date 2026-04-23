@@ -309,78 +309,50 @@ def get_tourist_data_only():
 def get_db_bookings_raw():
     """
     hotel_bookings 컬렉션 원본 반환 (예약 1건 = 1row).
+    실제 필드: 입실일자(DatetimeWithNanoseconds), 총금액(int),
+               객실료(int), 박수(int), 객실타입, 거래처, 상태 등
     """
     try:
-        if not db_hotel: return pd.DataFrame()
+        if not db_hotel:
+            return pd.DataFrame()
         docs = db_hotel.collection('hotel_bookings').stream()
         data = [d.to_dict() for d in docs]
-        if not data: return pd.DataFrame()
+        if not data:
+            return pd.DataFrame()
         df = pd.DataFrame(data)
 
-        # 1. 예약번호 필수 필터 (가짜/빈 데이터 차단)
-        if '예약번호' in df.columns:
-            df = df[df['예약번호'].notna() & (df['예약번호'].astype(str).str.strip() != '')]
-            df = df.drop_duplicates(subset=['예약번호'], keep='first')
-
-        # 2. 날짜 및 숫자 변환
+        # ── 날짜 컬럼: DatetimeWithNanoseconds → pandas datetime ──
         for date_col in ['입실일자', '퇴실일자', '예약일자', '확인일자', '취소일자']:
             if date_col in df.columns:
-                df[date_col] = pd.to_datetime(df[date_col], errors='coerce', utc=True).dt.tz_localize(None).dt.normalize()
+                # utc=True로 받아서 tz 제거
+                df[date_col] = pd.to_datetime(
+                    df[date_col], errors='coerce', utc=True
+                ).dt.tz_localize(None).dt.normalize()
 
+        # ── 금액 컬럼: 이미 숫자지만 혹시 문자열 섞인 경우 대비 ──
         for rev_col in ['총금액', '객실료', '객단가', '서비스료']:
             if rev_col in df.columns:
-                df[rev_col] = pd.to_numeric(df[rev_col].astype(str).str.replace(',', '').str.strip(), errors='coerce').fillna(0)
+                df[rev_col] = pd.to_numeric(
+                    df[rev_col].astype(str).str.replace(',', '').str.strip(),
+                    errors='coerce'
+                ).fillna(0)
 
+        # ── 정수 컬럼 ──
         for int_col in ['객실수', '박수']:
             if int_col in df.columns:
                 df[int_col] = pd.to_numeric(df[int_col], errors='coerce').fillna(0)
 
-        # ==============================================================
-        # 🚀 3. 취소 예약 '이중 철통 방어' (상태코드 + 취소일자 교차 검증)
-        # ==============================================================
+        # ── 취소 예약 제거 (상태: CO=체크아웃, CI=체크인, RES=예약 / CXL=취소) ──
         if '상태' in df.columns:
-            df = df[~df['상태'].astype(str).str.contains('CX|NS|CXL|취소|Cancel|RC', case=False, na=False)]
-        
-        if '취소일자' in df.columns:
-            # 💡 취소일자에 날짜가 적혀있으면 상태와 무관하게 100% 취소건! (.isna()인 진짜 확정만 남김)
-            df = df[df['취소일자'].isna()]
-
-        # ==============================================================
-        # 🚀 4. 단체(Master) / 멤버 중복 뻥튀기 완벽 제거
-        # ==============================================================
-        if '단체 ID' in df.columns:
-            # 단체 ID가 존재하는 예약만 추출
-            group_mask = df['단체 ID'].notna() & (df['단체 ID'].astype(str).str.strip() != '') & (df['단체 ID'].astype(str).str.lower() != 'nan')
-            
-            df_group = df[group_mask]
-            if not df_group.empty:
-                # 단체 ID별로 묶어서 행이 2개 이상인 경우(마스터+멤버 동시 다운로드) 찾기
-                group_counts = df_group['단체 ID'].value_counts()
-                mixed_groups = group_counts[group_counts > 1].index
-                
-                if len(mixed_groups) > 0:
-                    df_mixed = df[df['단체 ID'].isin(mixed_groups)]
-                    
-                    # 1) 각 단체 ID별로 '객실수'가 가장 큰 행을 마스터(Master)로 지정하여 보호
-                    master_indices = df_mixed.groupby('단체 ID')['객실수'].idxmax().values
-                    
-                    # 2) 마스터가 아니면서(멤버), 총금액이 0원인 껍데기 예약들을 모두 식별
-                    members_to_drop = df_mixed[~df_mixed.index.isin(master_indices) & (df_mixed['총금액'] == 0)].index
-                    
-                    # 3) 껍데기 멤버 삭제 (RN 중복 원천 차단)
-                    df = df.drop(index=members_to_drop)
-
-        # 5. 조식 마킹
-        if '서비스코드' in df.columns:
-            df['is_breakfast'] = df['서비스코드'].astype(str).str.lower().str.contains('bf', na=False)
-        else:
-            df['is_breakfast'] = False
+            df = df[~df['상태'].astype(str).str.contains('CXL|취소|Cancel', case=False, na=False)]
 
         return df
 
     except Exception as e:
         st.warning(f"⚠️ get_db_bookings_raw 오류: {e}")
         return pd.DataFrame()
+
+
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
     """
@@ -479,6 +451,141 @@ def save_otb_to_firebase(df):
         return True, f"{count}건 저장"
     except Exception as e:
         return False, str(e)
+
+
+# =============================================================================
+# 🆕 daily_snapshots 로더 (다른 앱에서 매일 저장하는 OTB 집계 데이터)
+# =============================================================================
+# 구조:
+#   daily_snapshots/{저장일자:2026-04-23}/months/{월:1|2|...|12}
+#     - json_data: "[{Date, DateStr, WeekDay, RMS, OCC, ADR, RevPAR, REV}, ...]"
+#     - sob_data: {FIT_REV, FIT_RMS, GRP_REV, GRP_RMS, TOTAL_OCC}
+#     - updated_at
+# =============================================================================
+
+@st.cache_data(ttl=600)
+def list_snapshot_dates():
+    """daily_snapshots 컬렉션의 저장 날짜 목록 (최신순)"""
+    if not db_hotel:
+        return []
+    try:
+        docs = db_hotel.collection('daily_snapshots').stream()
+        dates = [d.id for d in docs]
+        return sorted(dates, reverse=True)
+    except Exception as e:
+        st.warning(f"날짜 목록 조회 실패: {e}")
+        return []
+
+
+@st.cache_data(ttl=600)
+def load_daily_snapshot(snapshot_date=None):
+    """
+    daily_snapshots에서 OTB 데이터 로드.
+    snapshot_date가 None이면 가장 최신 날짜 사용.
+
+    반환: (df, meta_dict)
+      df 컬럼: date, otb_revenue, rooms_sold, adr, occ, revpar, weekday
+      meta_dict: {snapshot_date, updated_at, sob_summary: {...}}
+    """
+    if not db_hotel:
+        return pd.DataFrame(), {}
+
+    try:
+        # 최신 날짜 자동 선택
+        if not snapshot_date:
+            dates = list_snapshot_dates()
+            if not dates:
+                return pd.DataFrame(), {}
+            snapshot_date = dates[0]
+
+        # months 서브컬렉션 전체 로드
+        months_ref = db_hotel.collection('daily_snapshots').document(snapshot_date).collection('months')
+        month_docs = list(months_ref.stream())
+
+        if not month_docs:
+            return pd.DataFrame(), {'snapshot_date': snapshot_date, 'error': 'months 서브컬렉션 비어있음'}
+
+        import json as _json
+        all_rows = []
+        sob_summary = {
+            'FIT_REV': 0, 'FIT_RMS': 0,
+            'GRP_REV': 0, 'GRP_RMS': 0,
+            'TOTAL_OCC_sum': 0, 'TOTAL_OCC_count': 0
+        }
+        latest_updated_at = None
+
+        for doc in month_docs:
+            d = doc.to_dict()
+
+            # 일별 상세 (json_data 문자열 파싱)
+            json_str = d.get('json_data', '')
+            if json_str:
+                try:
+                    rows = _json.loads(json_str)
+                    for r in rows:
+                        all_rows.append({
+                            'date': r.get('Date') or r.get('DateStr'),
+                            'otb_revenue': r.get('REV', 0) or 0,
+                            'rooms_sold': r.get('RMS', 0) or 0,
+                            'adr': r.get('ADR', 0) or 0,
+                            'occ': r.get('OCC', 0) or 0,
+                            'revpar': r.get('RevPAR', 0) or 0,
+                            'weekday': r.get('WeekDay', ''),
+                            'source_month': doc.id,
+                        })
+                except Exception as pe:
+                    st.warning(f"월 {doc.id} json 파싱 실패: {pe}")
+
+            # SOB 합산
+            sob = d.get('sob_data', {}) or {}
+            sob_summary['FIT_REV'] += sob.get('FIT_REV', 0) or 0
+            sob_summary['FIT_RMS'] += sob.get('FIT_RMS', 0) or 0
+            sob_summary['GRP_REV'] += sob.get('GRP_REV', 0) or 0
+            sob_summary['GRP_RMS'] += sob.get('GRP_RMS', 0) or 0
+            if sob.get('TOTAL_OCC'):
+                sob_summary['TOTAL_OCC_sum'] += sob['TOTAL_OCC']
+                sob_summary['TOTAL_OCC_count'] += 1
+
+            # updated_at 최신값
+            if d.get('updated_at'):
+                if latest_updated_at is None or d['updated_at'] > latest_updated_at:
+                    latest_updated_at = d['updated_at']
+
+        if not all_rows:
+            return pd.DataFrame(), {'snapshot_date': snapshot_date, 'error': '일별 데이터 없음'}
+
+        df = pd.DataFrame(all_rows)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce').dt.tz_localize(None).dt.normalize()
+        df = df.dropna(subset=['date']).sort_values('date').reset_index(drop=True)
+
+        # 숫자 타입 보장
+        for col in ['otb_revenue', 'rooms_sold', 'adr', 'occ', 'revpar']:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
+
+        # 양방향 호환 컬럼 (기존 탭이 '입실일자' 참조)
+        df['입실일자'] = df['date']
+        df['총금액_숫자'] = df['otb_revenue']
+        df['박수'] = df['rooms_sold']
+
+        # 평균 OCC 계산
+        if sob_summary['TOTAL_OCC_count'] > 0:
+            sob_summary['TOTAL_OCC_avg'] = sob_summary['TOTAL_OCC_sum'] / sob_summary['TOTAL_OCC_count']
+        else:
+            sob_summary['TOTAL_OCC_avg'] = 0
+
+        meta = {
+            'snapshot_date': snapshot_date,
+            'updated_at': latest_updated_at,
+            'months_loaded': len(month_docs),
+            'total_days': len(df),
+            'sob_summary': sob_summary,
+        }
+        return df, meta
+
+    except Exception as e:
+        st.error(f"daily_snapshots 로드 실패: {e}")
+        return pd.DataFrame(), {'error': str(e)}
 # =============================================================================
 # 5. 메인 UI - 사이드바
 # =============================================================================
@@ -508,69 +615,58 @@ with st.sidebar:
         else:
             st.caption("⚪ db_rate - 미사용")
 
-    st.header("🏨 호텔 데이터 사령부")
-    st.caption("amber-otb-pickup (Hotel DB) 연동")
+    st.header("📊 OTB 데이터 (daily_snapshots)")
+    st.caption("다른 앱에서 매일 저장하는 OTB 스냅샷을 읽어옵니다")
 
-    # [1] 클라우드 데이터 불러오기
-    if st.button("🔄 클라우드 데이터 가져오기", use_container_width=True, type="primary"):
-        with st.spinner("호텔 DB에서 동기화 중..."):
-            # raw(예약 단위)와 daily(일자별 집계) 둘 다 시도
-            cloud_raw = get_db_bookings_raw()
-            cloud_daily = get_db_bookings_only()
+    # 저장된 스냅샷 날짜 목록 로드
+    snap_dates = list_snapshot_dates()
 
-            if not cloud_raw.empty or not cloud_daily.empty:
-                # 세션에는 일자별 집계본 저장 (탭7 전략사령부에서 사용)
-                if not cloud_daily.empty:
-                    st.session_state['otb_data'] = cloud_daily
-                    st.success(f"✅ 원본 {len(cloud_raw):,}건 → 일자별 {len(cloud_daily)}일 집계 완료")
-                else:
-                    st.session_state['otb_data'] = cloud_raw
-                    st.warning(f"⚠️ 원본 {len(cloud_raw):,}건 로드 (집계 실패, 컬럼 확인 필요)")
-                st.rerun()
-            else:
-                st.error("❌ hotel_bookings 컬렉션에 데이터가 없거나 연결 실패")
-                st.caption("💡 Firebase 콘솔 → amber-otb-pickup → hotel_bookings 확인")
+    if not snap_dates:
+        st.warning("📭 daily_snapshots에 저장된 데이터가 없습니다.")
+        st.caption("→ 다른 앱에서 먼저 저장이 필요합니다")
+    else:
+        # 기준일 선택 (기본값: 최신)
+        selected_snap = st.selectbox(
+            "📅 조회할 저장일",
+            snap_dates,
+            index=0,
+            help=f"총 {len(snap_dates)}개 저장일 중 선택"
+        )
 
-    # [1-a] 🔍 DB 상태 빠른 진단 버튼
-    if st.button("🔍 DB 구조 진단 (문제 해결용)", use_container_width=True):
-        if not db_hotel:
-            st.error("❌ db_hotel 연결 자체가 실패")
-        else:
-            try:
-                sample = list(db_hotel.collection('hotel_bookings').limit(3).stream())
-                if not sample:
-                    st.warning("📭 hotel_bookings 컬렉션이 비어있음")
-                else:
-                    st.success(f"✅ {len(sample)}개 샘플 확인됨")
-                    for doc in sample:
-                        with st.expander(f"문서 ID: {doc.id}"):
-                            st.json(doc.to_dict())
-            except Exception as e:
-                st.error(f"진단 실패: {e}")
-
-    st.markdown("---")
-
-    # [2] 파일 업로드 + 저장 (⭐ 날짜별 덮어쓰기)
-    uploaded_files = st.file_uploader("새 OTB 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
-    if uploaded_files:
-        parsed_df = parse_uploaded_files(uploaded_files)
-        if not parsed_df.empty:
-            st.session_state['otb_data'] = parsed_df
-            st.success(f"✅ {len(parsed_df)}일치 데이터 로드")
-
-            if st.button("📤 클라우드에 저장 (날짜별 덮어쓰기)", use_container_width=True):
-                with st.spinner("업로드 중..."):
-                    ok, msg = save_otb_to_firebase(parsed_df)
-                    if ok:
-                        st.success(f"🚀 {msg}")
-                        st.cache_data.clear()
+        # 최신 로드 버튼
+        c_l1, c_l2 = st.columns([3, 1])
+        with c_l1:
+            if st.button(f"🔄 [{selected_snap}] 불러오기", use_container_width=True, type="primary"):
+                with st.spinner("daily_snapshots 로드 중..."):
+                    df_loaded, meta = load_daily_snapshot(selected_snap)
+                    if not df_loaded.empty:
+                        st.session_state['otb_data'] = df_loaded
+                        st.session_state['otb_meta'] = meta
+                        st.success(f"✅ {meta['total_days']}일치 로드 완료!")
+                        st.rerun()
                     else:
-                        st.error(f"저장 실패: {msg}")
+                        st.error(f"❌ {selected_snap} 로드 실패: {meta.get('error', '알 수 없음')}")
 
-    st.markdown("---")
-    if st.button("🔄 캐시 초기화", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+        with c_l2:
+            if st.button("🔃", help="캐시 초기화", use_container_width=True):
+                st.cache_data.clear()
+                st.rerun()
+
+        # 현재 로드된 데이터 상태 표시
+        if 'otb_meta' in st.session_state:
+            meta = st.session_state['otb_meta']
+            with st.expander(f"📌 현재 데이터: {meta.get('snapshot_date', '?')}", expanded=False):
+                st.caption(f"- 월별 문서: {meta.get('months_loaded', 0)}개")
+                st.caption(f"- 총 일수: {meta.get('total_days', 0)}일")
+                sob = meta.get('sob_summary', {})
+                if sob:
+                    total_rev = (sob.get('FIT_REV', 0) or 0) + (sob.get('GRP_REV', 0) or 0)
+                    total_rms = (sob.get('FIT_RMS', 0) or 0) + (sob.get('GRP_RMS', 0) or 0)
+                    st.caption(f"- 연간 총매출: ₩{int(total_rev):,}")
+                    st.caption(f"- 연간 총 RN: {int(total_rms):,}")
+                    st.caption(f"- 평균 OCC: {sob.get('TOTAL_OCC_avg', 0):.1f}%")
+                if meta.get('updated_at'):
+                    st.caption(f"- 마지막 업데이트: {meta['updated_at']}")
 
     # -------------------------------------------------------------------------
     # 글로벌 데이터 타임머신

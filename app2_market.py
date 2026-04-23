@@ -408,8 +408,10 @@ def get_db_bookings_only():
 
 def save_otb_to_firebase(df):
     """
-    사이드바에서 업로드한 요약 OTB 엑셀을 저장.
-    ⭐ [근본 해결] 원본(hotel_bookings)과 섞이지 않게 'hotel_summary_otb' 폴더에 격리 저장!
+    온북 DF를 db_hotel의 hotel_bookings 컬렉션에 저장.
+    ⭐ 주의: 이 함수는 '일자별 요약' 데이터를 저장하는 용도.
+    doc_id를 'otb_YYYYMMDD'로 고정 → 같은 날짜 재업로드 시 덮어쓰기.
+    (실제 예약번호 단위의 PMS raw 데이터는 별도 경로로 저장됨)
     """
     if not db_hotel:
         return False, "DB 연결 없음"
@@ -424,38 +426,29 @@ def save_otb_to_firebase(df):
                 d_value = row.get('date')
                 if pd.isna(d_value):
                     continue
-                
-                # 1. 시간대 꼬리표 떼고 깔끔한 날짜만 남기기
-                d_ts = pd.to_datetime(d_value, errors='coerce')
-                if pd.isna(d_ts): continue
-                if d_ts.tzinfo is not None:
-                    d_ts = d_ts.tz_convert('UTC').tz_localize(None)
-                d_ts = d_ts.normalize()
-                
-                date_str = d_ts.strftime('%Y-%m-%d') 
-                doc_id = f"summary_{d_ts.strftime('%Y%m%d')}" # ID도 summary로 변경
+                if not isinstance(d_value, pd.Timestamp):
+                    d_value = pd.to_datetime(d_value)
+                doc_id = f"otb_{d_value.strftime('%Y%m%d')}"
 
-                # 2. 요약본에 꼭 필요한 정보만 추려서 저장
                 payload = {
-                    'date': date_str,
+                    'date': d_value.isoformat(),
+                    # 한글 호환 컬럼도 함께 저장 → 탭2 집계 로직이 찾을 수 있도록
+                    '입실일자': d_value.isoformat(),
                     'otb_revenue': float(row.get('otb_revenue', 0)),
+                    '총금액_숫자': float(row.get('otb_revenue', 0)),
                     'rooms_sold': float(row.get('rooms_sold', 0)),
-                    'updated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'data_type': 'SUMMARY' # 요약본임을 명시
+                    '객실수': float(row.get('rooms_sold', 0)),
+                    'updated_at': datetime.now().isoformat()
                 }
-                
-                # 🚨 [핵심 변경] hotel_bookings가 아닌 전용 창고(hotel_summary_otb)에 넣습니다.
-                batch.set(db_hotel.collection('hotel_summary_otb').document(doc_id), payload)
-                
+                batch.set(db_hotel.collection('hotel_bookings').document(doc_id), payload)
                 count += 1
                 if count % 400 == 0:
                     batch.commit()
                     batch = db_hotel.batch()
             except Exception:
                 continue
-                
         batch.commit()
-        return True, f"{count}건의 요약 데이터를 '전용 창고'에 안전하게 저장했습니다."
+        return True, f"{count}건 저장"
     except Exception as e:
         return False, str(e)
 # =============================================================================
@@ -551,24 +544,6 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    # 사이드바 맨 아래 추가
-    st.markdown("---")
-    st.markdown("### 🧹 DB 무결성 관리")
-    if st.button("🗑️ 오염된 예약 데이터(RN 100이상) 정밀 삭제", type="primary"):
-        with st.spinner("오염된 데이터를 소각 중..."):
-            docs = db_hotel.collection('hotel_bookings').stream()
-            batch = db_hotel.batch()
-            count = 0
-            for doc in docs:
-                d = doc.to_dict()
-                # 💡 박수가 100 이상이거나 총금액이 0인 쓰레기 데이터만 삭제
-                if pd.to_numeric(d.get('박수', 0), errors='coerce') > 100:
-                    batch.delete(doc.reference)
-                    count += 1
-            batch.commit()
-            st.success(f"✅ {count}개의 오염된 데이터를 영구 삭제했습니다. 이제 깨끗합니다!")
-            st.cache_data.clear()
-            st.rerun()
     # -------------------------------------------------------------------------
     # 글로벌 데이터 타임머신
     # -------------------------------------------------------------------------

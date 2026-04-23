@@ -840,6 +840,20 @@ with tab2:
             else:
                 total_rn = len(df_h)
 
+            # 조식 비중 계산
+            if 'is_breakfast' in df_h.columns:
+                bf_count = df_h['is_breakfast'].sum()
+                bf_ratio = (bf_count / len(df_h) * 100) if len(df_h) > 0 else 0
+            else:
+                bf_ratio = 0
+
+            k1, k2, k3, k4, k5 = st.columns(5) # 컬럼을 5개로 늘립니다.
+            k1.metric("기간 총 매출", f"{int(total_rev):,}원")
+            k2.metric("판매 객실수(RN)", f"{int(total_rn):,} RN")
+            k3.metric("평균 ADR", f"{int(adr_total):,}원")
+            k4.metric("평균 리드타임", f"{avg_lead:.1f}일")
+            k5.metric("조식 포함 비중", f"{bf_ratio:.1f}%", f"{int(bf_count)}건")
+
             total_bk = len(df_h)
             adr_total = total_rev / total_rn if total_rn > 0 else 0       # 총금액 기준 ADR
             adr_room  = room_rev  / total_rn if total_rn > 0 else 0       # 객실료 기준 ADR

@@ -321,6 +321,16 @@ def get_db_bookings_raw():
             return pd.DataFrame()
         df = pd.DataFrame(data)
 
+        if not df.empty:
+            # 💡 [핵심] 서비스코드에 'bf'가 들어있으면 조식 포함으로 표시
+            if '서비스코드' in df.columns:
+                df['is_breakfast'] = df['서비스코드'].astype(str).str.lower().str.contains('bf', na=False)
+            else:
+                # 만약 DB 컬럼명이 '서비스코드'가 아니라면 실제 컬럼명으로 바꿔주세요
+                df['is_breakfast'] = False 
+            
+        return df
+
         # ── 1. 취소 예약 제거 (기존 CXL 외에 팀장님이 말씀하신 RC 추가) ──
         if '상태' in df.columns:
             # RC를 취소 상태로 간주하여 필터링합니다.

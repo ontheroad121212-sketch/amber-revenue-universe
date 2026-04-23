@@ -139,14 +139,8 @@ def get_comp_data_only():
         return pd.DataFrame()
     except: return pd.DataFrame()
 
-# ============================================================
-# [원 대시보드.py 전용] 경쟁사 가격 데이터 로더
-# 파일1의 load_data() 함수를 이름 변경해서 그대로 이식
-# (파일1 탭들에서 사용하는 컬럼 구조가 달라서 별도 유지)
-# ============================================================
 @st.cache_data(ttl=600)
 def load_hotel_comp_data_legacy():
-    """원래 대시보드.py의 load_data() 함수. 파일1 탭 3개에서 사용."""
     if not db_flight:
         return pd.DataFrame()
     try:
@@ -156,12 +150,12 @@ def load_hotel_comp_data_legacy():
         for doc in docs:
             d = doc.to_dict()
             row = {
-                "CheckIn_Date": d.get("date"),            # 숙박 예정일 (예: 2026-03-28)
-                "Search_Date": d.get("search_date_str"),  # 크롤링한 날짜 (예: 20260206)
+                "CheckIn_Date": d.get("date"),
+                "Search_Date": d.get("search_date_str"),
                 "Hotel": d.get("hotel_name"),
                 "Min_Price": d.get("price"),
-                "Amber_Twin": d.get("hill_amber_twin"),    # 엠버 전용
-                "Pine_Double": d.get("hill_pine_double"),  # 엠버 전용
+                "Amber_Twin": d.get("hill_amber_twin"),
+                "Pine_Double": d.get("hill_pine_double"),
                 "Timestamp": d.get("crawled_at")
             }
             data.append(row)
@@ -170,12 +164,8 @@ def load_hotel_comp_data_legacy():
             return pd.DataFrame()
 
         df = pd.DataFrame(data)
-        
-        # 날짜 형식 변환
         df["CheckIn_Date"] = pd.to_datetime(df["CheckIn_Date"])
         df["Search_Date_DT"] = pd.to_datetime(df["Search_Date"], format="%Y%m%d", errors='coerce')
-        
-        # 정렬
         df = df.sort_values(by=["CheckIn_Date", "Search_Date_DT"])
         return df
     except:
@@ -238,8 +228,8 @@ with st.sidebar:
     if uploaded_files:
         parsed_df = parse_uploaded_files(uploaded_files)
         if not parsed_df.empty:
-            # 아까 변경하신 세션 변수명(viva_otb_data 등)이 있다면 그 이름으로 맞춰주세요!
-            st.session_state['viva_otb_data'] = parsed_df
+            # 💡 [수정] 탭 7과 완벽 호환되도록 세션 이름을 'otb_data'로 통일했습니다.
+            st.session_state['otb_data'] = parsed_df
             st.success(f"✅ {len(parsed_df)}일치 데이터 로드 완료")
     
     st.markdown("---")
@@ -248,7 +238,6 @@ with st.sidebar:
         st.cache_data.clear()
         st.rerun()
 
-    # 💡 [수정됨] 여기서부터 들여쓰기를 앞으로 당겨서 버튼 밖으로 꺼냈습니다!
     # -----------------------------------------------------------------
     # 글로벌 데이터 타임머신 (모든 탭 동기화)
     # -----------------------------------------------------------------
@@ -322,9 +311,8 @@ with st.sidebar:
     )
     st.session_state['selected_snapshot_id'] = selected_snapshot
 
-# 💡 [수정됨] 여기서부터 들여쓰기를 맨 앞으로 당겨서 사이드바 밖(중앙 메인 화면)으로 꺼냈습니다!
 # =========================================================================
-# 5. 탭 구성 (UI) - 파일1 탭 3개 + 파일2 탭 7개 = 총 10개 탭
+# 5. 탭 구성 (UI) - 총 10개 탭
 # =========================================================================
 tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "✈️ 항공권 (수요)",
@@ -334,9 +322,9 @@ tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8, tab9, tab10 = st.tabs([
     "📊 입도객 추이",
     "📜 과거 분석 (Pace)",
     "🧠 전략 사령부 (BI)",
-    "🏨 시장 최저가 대시보드",       # ← 파일1의 Tab1 이식
-    "💎 엠버 객실 전략",             # ← 파일1의 Tab2 이식
-    "📈 가격 변동 추이 (Time Travel)" # ← 파일1의 Tab3 이식
+    "🏨 시장 최저가 대시보드",
+    "💎 엠버 객실 전략",
+    "📈 가격 변동 추이 (Time Travel)"
 ])
 
 # --- TAB 1: 항공권 ---
@@ -416,8 +404,9 @@ with tab2:
         df_h_raw = get_db_bookings_only()
 
     if not df_h_raw.empty:
+        # 💡 [수정] Type Error 방지를 위해 시간대(utc) 옵션 제거 및 통일
         def safe_to_datetime(series):
-            return pd.to_datetime(series, errors='coerce', utc=True)
+            return pd.to_datetime(series, errors='coerce').dt.tz_localize(None).dt.normalize()
 
         if '예약일자' in df_h_raw.columns: df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['예약일자'])
         elif '접수일자' in df_h_raw.columns: df_h_raw['booking_date'] = safe_to_datetime(df_h_raw['접수일자'])
@@ -430,12 +419,11 @@ with tab2:
         elif '총금액_숫자' in df_h_raw.columns: df_h_raw['revenue'] = pd.to_numeric(df_h_raw['총금액_숫자'], errors='coerce').fillna(0)
         else: df_h_raw['revenue'] = 0
 
-        mask_valid = df_h_raw['booking_date'].notnull() & df_h_raw['checkin_date'].notnull()
-        if mask_valid.any(): df_h_raw.loc[mask_valid, 'lead_time'] = (df_h_raw.loc[mask_valid, 'checkin_date'] - df_h_raw.loc[mask_valid, 'booking_date']).dt.days
+        # 💡 [수정] Key Error 방지 (무조건 계산 후 빈칸 처리)
+        df_h_raw['lead_time'] = (df_h_raw['checkin_date'] - df_h_raw['booking_date']).dt.days
         df_h_raw['lead_time'] = df_h_raw['lead_time'].fillna(0)
         
-        mask_los = df_h_raw['checkin_date'].notnull() & df_h_raw['checkout_date'].notnull()
-        if mask_los.any(): df_h_raw.loc[mask_los, 'los'] = (df_h_raw.loc[mask_los, 'checkout_date'] - df_h_raw.loc[mask_los, 'checkin_date']).dt.days
+        df_h_raw['los'] = (df_h_raw['checkout_date'] - df_h_raw['checkin_date']).dt.days
         df_h_raw['los'] = df_h_raw['los'].fillna(1)
         
         df_h_raw['checkin_month'] = df_h_raw['checkin_date'].dt.strftime('%Y-%m')
@@ -462,7 +450,10 @@ with tab2:
             else: s_date, e_date = d_start, d_end
         else: s_date = e_date = sel_dates
         
-        mask_period = (df_h_raw['checkin_date'].dt.date >= s_date) & (df_h_raw['checkin_date'].dt.date <= e_date)
+        # 💡 [수정] 비교 구문 에러 방지를 위해 Pandas Timestamp 통일
+        s_ts = pd.Timestamp(s_date)
+        e_ts = pd.Timestamp(e_date)
+        mask_period = (df_h_raw['checkin_date'] >= s_ts) & (df_h_raw['checkin_date'] <= e_ts)
         df_h = df_h_raw[mask_period].copy()
         
         st.info(f"선택하신 기간 (**{s_date} ~ {e_date}**)의 예약 데이터 **{len(df_h):,}건**을 분석합니다.")
@@ -614,7 +605,7 @@ with tab3:
                 df_shift = df_shift.sort_values(['hotel_name', 'date'])
                 
                 fig_shift = px.line(df_shift, x='date', y='price', color='hotel_name', line_dash='조회일',
-                                    color_discrete_map={'Amber_Pure_Hill': 'red', 'Parnas_Jeju': 'green', 'Grand_Josun': 'blue'})
+                                     color_discrete_map={'Amber_Pure_Hill': 'red', 'Parnas_Jeju': 'green', 'Grand_Josun': 'blue'})
                 fig_shift.update_traces(line=dict(width=2.5))
                 st.plotly_chart(fig_shift, use_container_width=True)
     else: st.warning("데이터 없음")
@@ -642,7 +633,7 @@ with tab4:
             st.subheader(f"📈 차종별 일별 시세")
             df_melt_curr = df_curr.melt(id_vars=['date'], value_vars=cols_car, var_name='차종', value_name='가격')
             fig_r1 = px.line(df_melt_curr, x='date', y='가격', color='차종', markers=True,
-                            color_discrete_map={'Ray_Price': '#2ca02c', 'K5_Price': '#1f77b4', 'G80_Price': '#d62728'})
+                             color_discrete_map={'Ray_Price': '#2ca02c', 'K5_Price': '#1f77b4', 'G80_Price': '#d62728'})
             st.plotly_chart(fig_r1, use_container_width=True)
 
         st.markdown("---")
@@ -722,15 +713,12 @@ with tab5:
         df_season = df_t.copy()
         if 'year' in df_season.columns and 'mmdd' in df_season.columns:
             df_season['year_str'] = df_season['year'].astype(str)
-            
-            # 🌟 변경점 1: 'mmdd' 대신 시간의 흐름인 'date' 기준으로 정렬하여 꼬임 방지
             df_season = df_season.sort_values(by='date')
 
             sub1, sub2 = st.tabs(["총 입도객 비교", "외국인 급증세"])
             
             with sub1: 
                 fig1 = px.line(df_season, x='mmdd', y='total', color='year_str')
-                # 🌟 변경점 2: categoryorder를 추가하여 가로축이 무조건 01-01부터 순서대로 나오게 쐐기 박기
                 fig1.update_xaxes(type='category', categoryorder='category ascending')
                 st.plotly_chart(fig1, use_container_width=True)
                 
@@ -768,7 +756,7 @@ with tab6:
         df_rev_daily.rename(columns={'입실일자':'date'}, inplace=True)
         df_backtest = pd.merge(df_rev_daily, df_t, on='date', how='inner')
         
-        # 🌟 수정 포인트 1: 선이 왔다 갔다 꼬이지 않도록 날짜순으로 확실하게 정렬
+        # 🌟 [수정] 선이 꼬이지 않도록 정렬 보강
         df_backtest = df_backtest.sort_values('date')
         
         if not df_backtest.empty:
@@ -792,7 +780,7 @@ with tab6:
         df_ty['cumsum'] = df_ty['총금액_숫자'].cumsum()
         df_ly['cumsum'] = df_ly['총금액_숫자'].cumsum()
         
-        # 🌟 수정 포인트 2: outer 병합 시 순서가 뒤죽박죽될 수 있으므로, 반드시 'mmdd'로 정렬한 뒤 ffill(빈칸 채우기)을 해야 정상적으로 선이 이어집니다.
+        # 🌟 [수정] 병합 후 정렬 보강
         df_comp = pd.merge(df_ty, df_ly, on='mmdd', how='outer', suffixes=(f'_{this_y}', f'_{last_y}'))
         df_comp = df_comp.sort_values('mmdd').ffill().fillna(0)
         
@@ -800,10 +788,11 @@ with tab6:
         fig_pc.add_trace(go.Scatter(x=df_comp['mmdd'], y=df_comp[f'cumsum_{last_y}'], name=f"{last_y} 누적", line=dict(color='gray', dash='dot')))
         fig_pc.add_trace(go.Scatter(x=df_comp['mmdd'], y=df_comp[f'cumsum_{this_y}'], name=f"{this_y} 누적", line=dict(color='red', width=3)))
         
-        # 🌟 수정 포인트 3: 여기서도 가로축을 카테고리로 강제 지정하고 순서를 고정해 줍니다.
         fig_pc.update_xaxes(type='category', categoryorder='category ascending')
         
         st.plotly_chart(fig_pc, use_container_width=True)
+    else:
+        st.warning("Pace Report 데이터 부족")
 
 # --- TAB 7: 전략 사령부 (BI) ---
 with tab7:

@@ -298,45 +298,67 @@ def get_tourist_data_only():
 
 @st.cache_data(ttl=600)
 def get_db_bookings_only():
-    if not db_hotel: return pd.DataFrame()
-    
     try:
-        # 이제 진짜 'amber-otb-pickup' 프로젝트의 컬렉션을 뒤집니다.
-        docs = db_hotel.collection('hotel_bookings').stream()
-        data = [d.to_dict() for d in docs]
+        if not db_hotel: return pd.DataFrame()
         
-        if not data: # 만약 hotel_bookings가 비어있다면 integrity_history를 예비로 스캔
-            docs = db_hotel.collection('revenue_integrity_history').stream()
-            data = []
-            for doc in docs:
-                d = doc.to_dict()
-                # 리스트 형태면 풀어서, 아니면 그대로 추가
-                found = False
-                for k, v in d.items():
-                    if isinstance(v, list): data.extend(v); found = True
-                if not found: data.append(d)
+        all_records = []
+        
+        # 1️⃣ [메인 타겟] revenue_integrity_history 컬렉션 뒤지기
+        # 팀장님 스크린샷에서 보인 2025-10-13... 같은 문서들을 다 엽니다.
+        docs_hist = db_hotel.collection('revenue_integrity_history').stream()
+        for doc in docs_hist:
+            d = doc.to_dict()
+            
+            # 문서 자체가 리스트인 경우 (예: [{}, {}, ...])
+            if isinstance(d, list):
+                all_records.extend(d)
+            # 문서 안에 'data' 같은 키에 리스트가 들어있는 경우
+            elif isinstance(d, dict):
+                list_found = False
+                for v in d.values():
+                    if isinstance(v, list):
+                        all_records.extend(v)
+                        list_found = True
+                # 리스트가 아니라 그냥 문서 자체가 하나의 데이터인 경우
+                if not list_found:
+                    all_records.append(d)
 
-        df = pd.DataFrame(data)
+        # 2️⃣ [서브 타겟] hotel_bookings 컬렉션도 혹시 모르니 다 가져오기
+        docs_book = db_hotel.collection('hotel_bookings').stream()
+        for doc in docs_book:
+            all_records.append(doc.to_dict())
+
+        if not all_records:
+            return pd.DataFrame()
+
+        # 데이터프레임 생성
+        df = pd.DataFrame(all_records)
         
-        if not df.empty:
-            # 💡 표준화 브릿지
-            if 'date' in df.columns and '입실일자' not in df.columns: df['입실일자'] = df['date']
-            if 'otb_revenue' in df.columns and '총금액_숫자' not in df.columns: df['총금액_숫자'] = df['otb_revenue']
+        # 💡 [핵심] 컬럼명 표준화 (팀장님 DB의 실제 필드명에 맞춰 변환)
+        # 입실일자나 접수일자 등이 들어있는 컬럼을 찾아서 통일합니다.
+        rename_map = {
+            'Stay_Date': '입실일자', 'checkin_date': '입실일자', 'date': '입실일자',
+            'Daily_Rev': '총금액_숫자', 'revenue': '총금액_숫자', 'otb_revenue': '총금액_숫자',
+            'Daily_RN': '박수', 'rooms_sold': '박수'
+        }
+        for old, new in rename_map.items():
+            if old in df.columns and new not in df.columns:
+                df = df.rename(columns={old: new})
+
+        # 날짜 타입 변환 (errors='coerce'로 잘못된 날짜는 무시)
+        for col in ['입실일자', '접수일자', '예약일자', '퇴실일자']:
+            if col in df.columns:
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
+        
+        # 금액 타입 변환
+        target_rev_col = '총금액_숫자' if '총금액_숫자' in df.columns else ('총금액' if '총금액' in df.columns else None)
+        if target_rev_col:
+            df['총금액_숫자'] = pd.to_numeric(df[target_rev_col].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
             
-            for col in ['입실일자', '접수일자', '예약일자']:
-                if col in df.columns:
-                    df[col] = pd.to_datetime(df[col], errors='coerce').dt.tz_localize(None).dt.normalize()
-            
-            if '총금액' in df.columns: 
-                df['총금액_숫자'] = pd.to_numeric(df['총금액'].astype(str).str.replace(',', ''), errors='coerce').fillna(0)
-            elif '총금액_숫자' in df.columns:
-                df['총금액_숫자'] = pd.to_numeric(df['총금액_숫자'], errors='coerce').fillna(0)
-                
         return df
     except Exception as e:
-        st.error(f"데이터 로드 중 에러: {e}")
+        st.error(f"❌ 데이터 로드 중 치명적 오류: {e}")
         return pd.DataFrame()
-
 def save_otb_to_firebase(df):
     """
     온북 DF를 db_hotel의 hotel_bookings 컬렉션에 저장.

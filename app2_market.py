@@ -820,26 +820,40 @@ with tab2:
         st.markdown("---")
 
         if not df_h.empty:
-            total_rev = df_h['revenue'].sum()
-            total_bk = len(df_h)
+            total_rev = df_h['revenue'].sum()  # 총금액 합계
 
-            # ⭐ ADR = 총금액 합계 ÷ 박수 합계 (예약건수로 나누면 2박짜리가 과대계산됨)
-            if '박수' in df_h.columns:
-                total_nights = df_h['박수'].sum()
-                adr = total_rev / total_nights if total_nights > 0 else 0
-                adr_label = "평균 객단가 (ADR/박)"
+            # ⭐ 객실료 합계 (순수 객실 매출)
+            if '객실료' in df_h.columns:
+                room_rev = pd.to_numeric(df_h['객실료'], errors='coerce').fillna(0).sum()
             else:
-                adr = total_rev / total_bk if total_bk > 0 else 0
-                adr_label = "평균 객단가 (ADR/건)"
+                room_rev = total_rev
 
-            avg_lead = df_h['lead_time'].mean() if 'lead_time' in df_h.columns else 0
-            total_nights_display = int(df_h['박수'].sum()) if '박수' in df_h.columns else total_bk
+            # ⭐ RoomNight = 박수 × 객실수 (정확한 ADR 분모)
+            if '박수' in df_h.columns and '객실수' in df_h.columns:
+                df_h['room_nights'] = (
+                    pd.to_numeric(df_h['박수'], errors='coerce').fillna(1) *
+                    pd.to_numeric(df_h['객실수'], errors='coerce').fillna(1)
+                )
+                total_rn = df_h['room_nights'].sum()
+            elif '박수' in df_h.columns:
+                total_rn = pd.to_numeric(df_h['박수'], errors='coerce').fillna(1).sum()
+            else:
+                total_rn = len(df_h)
+
+            total_bk = len(df_h)
+            adr_total = total_rev / total_rn if total_rn > 0 else 0       # 총금액 기준 ADR
+            adr_room  = room_rev  / total_rn if total_rn > 0 else 0       # 객실료 기준 ADR
+            avg_lead  = df_h['lead_time'].mean() if 'lead_time' in df_h.columns else 0
 
             k1, k2, k3, k4 = st.columns(4)
-            k1.metric("기간 총 매출", f"{int(total_rev):,}원")
-            k2.metric("기간 예약 건수", f"{total_bk:,}건 ({total_nights_display:,}박)")
-            k3.metric(adr_label, f"{int(adr):,}원")
-            k4.metric("평균 리드타임", f"{avg_lead:.1f}일")
+            k1.metric("기간 총 매출 (총금액)", f"{int(total_rev):,}원",
+                      f"객실료 {int(room_rev):,}원")
+            k2.metric("기간 예약 건수 / RoomNight",
+                      f"{total_bk:,}건",
+                      f"{int(total_rn):,} RN")
+            k3.metric("ADR (총금액 ÷ RN)", f"{int(adr_total):,}원")
+            k4.metric("ADR (객실료 ÷ RN)", f"{int(adr_room):,}원",
+                      f"리드타임 평균 {avg_lead:.1f}일")
 
             st.markdown("---")
             st.subheader("📈 Booking Pace")
@@ -862,12 +876,30 @@ with tab2:
                     bins = [-1, 0, 3, 7, 14, 30, 60, 90, 180, 365]
                     labels = ['DayOf', '0-3일', '4-7일', '8-14일', '15-30일', '31-60일', '61-90일', '90-180일', '180일+']
                     df_h['lead_grp'] = pd.cut(df_h['lead_time'], bins=bins, labels=labels)
-                    grp_stats = df_h.groupby('lead_grp', observed=False).agg(
-                        adr=('revenue', 'mean'), count=('revenue', 'count')
+
+                    # ⭐ ADR = 객실료 합계 ÷ RoomNight 합계 (그룹별)
+                    def grp_adr(g):
+                        rn = (g['room_nights'].sum() if 'room_nights' in g.columns
+                              else g['박수'].sum() if '박수' in g.columns
+                              else len(g))
+                        rev = g['객실료'].sum() if '객실료' in g.columns else g['revenue'].sum()
+                        return rev / rn if rn > 0 else 0
+
+                    grp_stats = df_h.groupby('lead_grp', observed=False).apply(
+                        lambda g: pd.Series({
+                            'adr': grp_adr(g),
+                            'count': len(g),
+                            'rn': g['room_nights'].sum() if 'room_nights' in g.columns else len(g)
+                        })
                     ).reset_index()
+
                     fig_lead = make_subplots(specs=[[{"secondary_y": True}]])
-                    fig_lead.add_trace(go.Bar(x=grp_stats['lead_grp'], y=grp_stats['count'], name="예약 건수", marker_color='#AEC7E8'), secondary_y=False)
-                    fig_lead.add_trace(go.Scatter(x=grp_stats['lead_grp'], y=grp_stats['adr'], name="평균 ADR", line=dict(color='#FF7F0E', width=3)), secondary_y=True)
+                    fig_lead.add_trace(go.Bar(x=grp_stats['lead_grp'], y=grp_stats['rn'],
+                                               name="RoomNight", marker_color='#AEC7E8'), secondary_y=False)
+                    fig_lead.add_trace(go.Scatter(x=grp_stats['lead_grp'], y=grp_stats['adr'],
+                                                   name="객실료 ADR", line=dict(color='#FF7F0E', width=3)), secondary_y=True)
+                    fig_lead.update_yaxes(title_text="RoomNight", secondary_y=False)
+                    fig_lead.update_yaxes(title_text="ADR (원)", secondary_y=True)
                     st.plotly_chart(fig_lead, use_container_width=True)
 
             with col_d2:
@@ -875,8 +907,24 @@ with tab2:
                 if '거래처' in df_h.columns:
                     top_ch = df_h['거래처'].value_counts().nlargest(10).index
                     df_h['channel_sim'] = df_h['거래처'].apply(lambda x: x if x in top_ch else '기타')
-                    ch_stats = df_h.groupby('channel_sim').agg(rev=('revenue', 'sum'), adr=('revenue', 'mean')).reset_index()
-                    fig_ch = px.treemap(ch_stats, path=['channel_sim'], values='rev', color='adr', color_continuous_scale='RdBu')
+
+                    # ⭐ 채널별: 총금액 합계 + 객실료 ADR
+                    def ch_adr(g):
+                        rn = g['room_nights'].sum() if 'room_nights' in g.columns else len(g)
+                        rev = g['객실료'].sum() if '객실료' in g.columns else g['revenue'].sum()
+                        return rev / rn if rn > 0 else 0
+
+                    ch_stats = df_h.groupby('channel_sim').apply(
+                        lambda g: pd.Series({
+                            'rev': g['revenue'].sum(),
+                            'room_adr': ch_adr(g),
+                            'rn': g['room_nights'].sum() if 'room_nights' in g.columns else len(g)
+                        })
+                    ).reset_index()
+
+                    fig_ch = px.treemap(ch_stats, path=['channel_sim'], values='rev',
+                                         color='room_adr', color_continuous_scale='RdBu',
+                                         title="면적=총금액, 색상=객실료ADR")
                     st.plotly_chart(fig_ch, use_container_width=True)
                 else:
                     st.info("요약 온북엔 거래처 정보 없음. PMS 원본 사용 시 표시.")

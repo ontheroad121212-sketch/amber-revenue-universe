@@ -719,8 +719,8 @@ if sob_files:
                                 rn_val = clean_numeric(target_row[c_rn]) if c_rn else 0.0
                                 adr_val = clean_numeric(target_row[c_adr]) if c_adr else (rev_val/rn_val if rn_val>0 else 0)
 
-                                if rev_val > yearly_data_store[f_m]['rev']:
-                                    yearly_data_store[f_m] = {"rev": rev_val, "occ": occ_val, "rn": rn_val, "adr": adr_val}
+                                # 무조건 덮어쓰도록 방어막 해제
+                                yearly_data_store[f_m] = {"rev": rev_val, "occ": occ_val, "rn": rn_val, "adr": adr_val}
         st.sidebar.success("✅ 최신 SOB 데이터로 업데이트 완료")
     except Exception as e: st.sidebar.error(f"SOB 처리 실패: {e}")
 

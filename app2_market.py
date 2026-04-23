@@ -321,6 +321,18 @@ def get_db_bookings_raw():
             return pd.DataFrame()
         df = pd.DataFrame(data)
 
+        # ── 1. 취소 예약 제거 (기존 CXL 외에 팀장님이 말씀하신 RC 추가) ──
+        if '상태' in df.columns:
+            # RC를 취소 상태로 간주하여 필터링합니다.
+            df = df[~df['상태'].astype(str).str.contains('CXL|취소|Cancel|RC', case=False, na=False)]
+
+        # ── 2. 조식 포함 여부 로직 추가 (서비스코드에 bf가 포함되면 조식) ──
+        if '서비스코드' in df.columns:
+            # 서비스코드에 'bf'가 들어가면 True(조식포함), 아니면 False(룸온리)
+            df['is_breakfast'] = df['서비스코드'].astype(str).str.lower().str.contains('bf', na=False)
+        else:
+            df['is_breakfast'] = False
+
         # ── 날짜 컬럼: DatetimeWithNanoseconds → pandas datetime ──
         for date_col in ['입실일자', '퇴실일자', '예약일자', '확인일자', '취소일자']:
             if date_col in df.columns:

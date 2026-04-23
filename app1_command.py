@@ -1996,49 +1996,60 @@ if not st.session_state.cmd_today_df.empty:
     curr = st.session_state.cmd_today_df
     prev = st.session_state.cmd_prev_df
 
+    # 1단계: 변수를 먼저 계산합니다. (이게 아래 조치사항 카드에서 사용됩니다)
     alert_opp_df = calculate_opportunity_cost(
         curr, df_flight_all, df_comp_all,
         josun_threshold, flight_threshold,
         active_search_date, events=all_events, sensitivity=sensitivity
     )
 
-    # 🚨 상단 Dynamic 알림 (미래만)
-    alerts = generate_today_alerts(alert_opp_df, all_notes, all_events, top_n=5, only_future=True)
-    if alerts:
-        st.markdown(f"""
-        <div style='background: linear-gradient(90deg, #FF6B6B 0%, #FFA500 100%); 
-                    padding: 12px 20px; border-radius: 10px; color: white; margin-bottom: 10px;'>
-            <div style='font-size: 20px; font-weight: bold;'>🚨 오늘 주목해야 할 미래 날짜 TOP 5</div>
-            <div style='font-size: 12px; opacity: 0.9;'>오늘({TODAY.strftime('%m/%d')}) 이후 시그널 발동 중인 날짜</div>
-        </div>
-        """, unsafe_allow_html=True)
-        alert_cols = st.columns(len(alerts))
-        for idx, a in enumerate(alerts):
-            with alert_cols[idx]:
-                note_icon = "📝" if a['메모있음'] else "⚪"
-                ev_icon = f"🎉{a['이벤트'][:5]}" if a['이벤트'] else ""
-                bg_color = "#FFEBEE" if a['BAR상승'] >= 2 else "#FFF3E0"
-                border_color = "#C62828" if a['BAR상승'] >= 2 else "#FF6F00"
-                days_until = (a['날짜'] - TODAY).days
-                urgency = f"D-{days_until}" if days_until > 0 else "오늘"
-                st.markdown(f"""
-                <div style='background:{bg_color}; border:2px solid {border_color}; 
-                            border-radius:10px; padding:12px; min-height:150px;'>
-                    <div style='font-size:11px; color:#888; font-weight:bold;'>{urgency}</div>
-                    <div style='font-size:13px; color:#666; font-weight:bold;'>
-                        {a['날짜'].strftime('%m/%d')} ({a['요일']}) {note_icon}
-                    </div>
-                    <div style='font-size:22px; color:{border_color}; font-weight:bold; margin:5px 0;'>
-                        BAR +{a['BAR상승']}
-                    </div>
-                    <div style='font-size:11px; color:#444;'>{a['시그널'][:25]}{ev_icon}</div>
-                    <div style='font-size:13px; color:#D32F2F; font-weight:bold; margin-top:6px;'>
-                        ₩{a['기회비용']:,}
-                    </div>
-                    {f"<div style='font-size:10px; color:#888; margin-top:4px;'>📝 {a['메모미리보기']}...</div>" if a['메모있음'] else ""}
-                </div>""", unsafe_allow_html=True)
-        st.markdown("")
+    # 2단계: 🎯 Today's Action Board (GPT 피드백 반영 - 최상단 배치)
+    st.markdown("---")
+    st.markdown("## 🎯 Today's Action Board (오늘의 최우선 조치사항)")
+    st.caption("시스템이 분석한 수익 누수 및 점유율 위험 날짜 중, 오늘 즉시 개입해야 할 TOP 5입니다.")
 
+    action_cards = []
+
+    # (A) 수익 누수(Dynamic) 조치 사항 추출
+    if not alert_opp_df.empty:
+        future_opp = alert_opp_df[(alert_opp_df['BAR상승'] > 0) & (alert_opp_df['날짜'] >= TODAY)]
+        top_opp = future_opp.nlargest(3, '기회비용')
+        for _, row in top_opp.iterrows():
+            action_cards.append({
+                'type': '🩸 단가 상향(수익누수)', 
+                'date': row['날짜'], 
+                'msg': f"{row['객실타입']} BAR +{row['BAR상승']}단계 상향 제안 (기회비용: {int(row['기회비용']):,}원)",
+                'color': '#FF5252'
+            })
+
+    # (B) 점유율 위험(Fixed) 조치 사항 추출
+    fixed_alerts_future, _ = get_fixed_room_alerts(curr, all_events)
+    if fixed_alerts_future:
+        critical_fixed = [a for a in fixed_alerts_future if a['level'] == 'critical'][:2]
+        for a in critical_fixed:
+            action_cards.append({
+                'type': '🚨 Fixed 긴급 인상', 
+                'date': a['날짜'], 
+                'msg': f"전체 점유율 {a['전체점유율']}% 도달. Fixed 객실 수기 인상 요망!",
+                'color': '#9C27B0'
+            })
+
+    # 카드 렌더링 (가로로 배치)
+    if action_cards:
+        cols = st.columns(len(action_cards))
+        for i, card in enumerate(action_cards):
+            with cols[i]:
+                d_day = (card['date'] - TODAY).days
+                st.markdown(f"""
+                <div style='background:white; border-top:5px solid {card['color']}; padding:15px; border-radius:8px; box-shadow:0 2px 4px rgba(0,0,0,0.1); height:165px;'>
+                    <div style='color:{card['color']}; font-size:11px; font-weight:bold;'>{card['type']} (D-{d_day})</div>
+                    <div style='font-size:15px; font-weight:bold; margin:5px 0;'>{card['date'].strftime('%m/%d')} ({WEEKDAYS_KR[card['date'].weekday()]})</div>
+                    <div style='font-size:11px; color:#555; line-height:1.4;'>{card['msg']}</div>
+                </div>
+                """, unsafe_allow_html=True)
+    else:
+        st.success("🎉 오늘 즉시 조치할 긴급 알림이 없습니다. 완벽하게 관리되고 있습니다!")
+    st.markdown("---")
     # 🏨 Fixed 수기 인상 (미래만)
     fixed_alerts_future, fixed_alerts_past = get_fixed_room_alerts(curr, all_events)
     if fixed_alerts_future:

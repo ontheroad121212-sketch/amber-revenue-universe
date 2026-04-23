@@ -827,8 +827,18 @@ with tab2:
         else:
             s_date = e_date = sel_dates
 
-        mask_period = (df_h_raw['checkin_date'].dt.date >= s_date) & (df_h_raw['checkin_date'].dt.date <= e_date)
+        # ==============================================================
+        # 💡 [에러 해결 부분] Python date를 Pandas Timestamp로 강제 변환 후 안전하게 비교!
+        # ==============================================================
+        s_ts = pd.to_datetime(s_date)
+        e_ts = pd.to_datetime(e_date)
+
+        # .dt.date 를 빼버리고, 무조건 datetime 형식으로 강제 통일하여 비교합니다.
+        checkin_series = pd.to_datetime(df_h_raw['checkin_date'], errors='coerce').dt.normalize()
+        
+        mask_period = (checkin_series >= s_ts) & (checkin_series <= e_ts)
         df_h = df_h_raw[mask_period].copy()
+        
         st.info(f"기간 (**{s_date} ~ {e_date}**) 예약 데이터 **{len(df_h):,}건** 분석")
         st.markdown("---")
 

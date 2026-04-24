@@ -1490,27 +1490,27 @@ with tab7:
             new_adr = curr_adr_d + raise_amt
             
             # 1. 경쟁사 가중치 인덱스 (단순 평균 탈피)
-            # 엠버와 타깃이 겹치는 파르나스에 65%, 그랜드조선에 35% 가중치 부여
+            # 타깃이 겹치는 파르나스에 65%, 그랜드조선에 35% 가중치 부여 (필요시 비율 조정 가능)
             weight_parnas, weight_josun = 0.65, 0.35
             if parnas_p > 0 and josun_p > 0:
                 comp_index = (parnas_p * weight_parnas) + (josun_p * weight_josun)
             else:
-                comp_index = parnas_p if parnas_p > 0 else josun_p # 둘 중 하나만 있으면 그것만 사용
+                comp_index = parnas_p if parnas_p > 0 else josun_p
                 
-            # 2. 비선형 탄력성 모델 (Non-linear Elasticity & Veblen Effect)
-            MIN_LUXURY_ADR = 250000 # 엠버퓨어힐 브랜드 훼손 방어선 (25만 원)
+            # 2. 비선형 탄력성 모델 (Non-linear Elasticity & Brand Defense)
+            MIN_LUXURY_ADR = 250000 # 💡 엠버퓨어힐 브랜드 훼손 심리적 방어선 (25만 원)
             
             if new_adr < MIN_LUXURY_ADR:
-                # [브랜드 훼손 구간] 가격을 너무 내리면 오히려 예약이 꺾임 (역탄력성)
+                # [브랜드 훼손 구간] 가격을 너무 후려치면 럭셔리 타깃층이 이탈하여 수요가 오히려 감소함
                 damage_ratio = (MIN_LUXURY_ADR - new_adr) / MIN_LUXURY_ADR
-                organic_impact = -natural_pickup * (damage_ratio * 2.0) # 수요 급감
+                organic_impact = -natural_pickup * (damage_ratio * 2.0)
                 new_market_demand = 0
             else:
-                # [정상 탄력 구간] 지수 함수(Exponential)를 사용한 저항선 계산
+                # [정상 구간] 가격 저항선을 지수(Exponential)로 계산
                 price_ratio = new_adr / curr_adr_d if curr_adr_d > 0 else 1
                 organic_impact = natural_pickup * (1 - (price_ratio ** elasticity))
                 
-                # 시장 흡수율 (경쟁사 인덱스 대비 얼마나 저렴한가?)
+                # 시장 흡수율 (경쟁사 인덱스 대비 얼마나 저렴한가에 따른 추가 픽업)
                 if comp_index > 0 and new_adr < comp_index:
                     comp_advantage = (comp_index - new_adr) / comp_index
                     unsold_inventory = TOTAL_ROOMS - (curr_sold + natural_pickup)
@@ -1518,6 +1518,7 @@ with tab7:
                 else:
                     new_market_demand = 0
 
+            # 3. 최종 시나리오 산출
             adjusted_pickup = max(0, int(natural_pickup + organic_impact + new_market_demand))
             scenario_final_sold = min(TOTAL_ROOMS, curr_sold + adjusted_pickup)
             scenario_final_rev = (curr_sold * curr_adr_d) + (adjusted_pickup * new_adr)

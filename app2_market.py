@@ -564,62 +564,90 @@ with st.sidebar:
                 sel_snap = st.selectbox("불러올 기준일자 선택", snap_list)
                 
                 if st.button("📥 전략사령부에 OTB 적용", use_container_width=True, type="primary"):
-                    with st.spinner(f"{sel_snap} 데이터 로드 중..."):
+                    with st.spinner(f"{sel_snap} 데이터 스캔 및 로드 중..."):
                         import json
                         
                         doc_ref = db_hotel.collection('daily_snapshots').document(sel_snap)
-                        doc_data = doc_ref.get().to_dict()
+                        doc_doc = doc_ref.get()
+                        doc_data = doc_doc.to_dict() if doc_doc.exists else {}
                         
                         all_dfs = []
+                        field_cands = ['json_data', 'data', 'pms_data', 'otb_data', 'raw_data']
                         
-                        # 💡 패턴 1: 최신 포맷 (문서 자체에 json_data가 있는 경우)
-                        if doc_data and 'json_data' in doc_data:
+                        # 1. 문서 루트 필드 탐색
+                        for f in field_cands:
+                            if doc_data and f in doc_data:
+                                try:
+                                    parsed = json.loads(doc_data[f]) if isinstance(doc_data[f], str) else doc_data[f]
+                                    if parsed: all_dfs.append(pd.DataFrame(parsed))
+                                except: pass
+                        
+                        # 2. 모든 하위 폴더(컬렉션) 자동 탐색 (month 포함)
+                        sub_cols = [sub.id for sub in doc_ref.collections()]
+                        for sub_name in sub_cols:
                             try:
-                                all_dfs.append(pd.DataFrame(json.loads(doc_data['json_data'])))
+                                sub_docs = doc_ref.collection(sub_name).stream()
+                                for s_doc in sub_docs:
+                                    s_data = s_doc.to_dict() or {}
+                                    for f in field_cands:
+                                        if f in s_data:
+                                            try:
+                                                parsed = json.loads(s_data[f]) if isinstance(s_data[f], str) else s_data[f]
+                                                if parsed: all_dfs.append(pd.DataFrame(parsed))
+                                            except: pass
                             except: pass
-                        
-                        # 💡 패턴 2: 구 포맷 (month 하위 폴더에 1~12월로 나뉜 경우)
-                        try:
-                            month_docs = doc_ref.collection('month').stream()
-                            for m_doc in month_docs:
-                                m_data = m_doc.to_dict()
-                                if m_data and 'json_data' in m_data:
-                                    try:
-                                        all_dfs.append(pd.DataFrame(json.loads(m_data['json_data'])))
-                                    except: pass
-                        except: pass
                         
                         if all_dfs:
                             df_snap = pd.concat(all_dfs, ignore_index=True)
                             
-                            # 🚀 1970년 날짜 뭉침 버그 완벽 방어!
-                            if 'DateStr' in df_snap.columns:
-                                df_snap['date'] = pd.to_datetime(df_snap['DateStr'], errors='coerce')
-                            elif 'Date' in df_snap.columns:
-                                df_snap['date'] = pd.to_datetime(df_snap['Date'], errors='coerce')
-                                
-                            # 혹시라도 1970년으로 파싱되었다면 밀리초 단위 타임스탬프로 강제 재파싱
-                            if 'date' in df_snap.columns and (df_snap['date'].dt.year == 1970).any():
-                                raw_date = df_snap['DateStr'] if 'DateStr' in df_snap.columns else df_snap['Date']
-                                df_snap['date'] = pd.to_datetime(raw_date, errors='coerce', unit='ms')
+                            # ==========================================
+                            # 🚀 1970년 뭉침 버그 완벽 방어 (타임스탬프 처리)
+                            # ==========================================
+                            date_col = None
+                            for c in ['DateStr', 'Date', 'date', '입실일자', 'Stay_Date']:
+                                if c in df_snap.columns:
+                                    date_col = c
+                                    break
                             
-                            # 💡 에러의 핵심: 빈 날짜(NaT)가 0으로 치환되며 1970-01-01이 되는 현상 차단
+                            if date_col:
+                                # 숫자로 된 시간(밀리초)이면 unit='ms' 적용
+                                if pd.api.types.is_numeric_dtype(df_snap[date_col]):
+                                    df_snap['date'] = pd.to_datetime(df_snap[date_col], unit='ms', errors='coerce')
+                                else:
+                                    df_snap['date'] = pd.to_datetime(df_snap[date_col], errors='coerce')
+                                
+                                # 문자열이었는데 1970년으로 잘못 파싱된 경우 강제 재교정
+                                mask_1970 = df_snap['date'].dt.year == 1970
+                                if mask_1970.any():
+                                    df_snap.loc[mask_1970, 'date'] = pd.to_datetime(
+                                        pd.to_numeric(df_snap.loc[mask_1970, date_col], errors='coerce'), 
+                                        unit='ms', errors='coerce'
+                                    )
+                            
+                            # 날짜가 변환 안 된 쓰레기 값 제거
                             df_snap = df_snap.dropna(subset=['date'])
                             df_snap['date'] = df_snap['date'].dt.normalize()
                             
+                            # 매출 및 객실수 표준 포맷 변환
                             if 'REV' in df_snap.columns:
                                 df_snap['otb_revenue'] = pd.to_numeric(df_snap['REV'], errors='coerce').fillna(0)
+                            elif 'Daily_Rev' in df_snap.columns:
+                                df_snap['otb_revenue'] = pd.to_numeric(df_snap['Daily_Rev'], errors='coerce').fillna(0)
+                                
                             if 'RMS' in df_snap.columns:
                                 df_snap['rooms_sold'] = pd.to_numeric(df_snap['RMS'], errors='coerce').fillna(0)
+                            elif 'Daily_RN' in df_snap.columns:
+                                df_snap['rooms_sold'] = pd.to_numeric(df_snap['Daily_RN'], errors='coerce').fillna(0)
                                 
-                            # 세션 덮어쓰기 완료
+                            # 세션 덮어쓰기
                             st.session_state['otb_data'] = normalize_otb_columns(df_snap)
-                            
-                            st.success(f"✅ {sel_snap} 스냅샷 (총 {len(df_snap)}일 데이터) 적용 완료!")
+                            st.success(f"✅ {sel_snap} 스냅샷 (총 {len(df_snap)}일치 데이터) 적용 완료!")
                             time.sleep(1)
                             st.rerun()
                         else:
-                            st.warning(f"⚠️ {sel_snap} 문서나 하위 폴더에서 OTB 데이터를 찾지 못했습니다.")
+                            st.warning(f"⚠️ {sel_snap}에서 데이터를 찾지 못했습니다.")
+                            # 💡 디버깅 힌트: 실제 어떤 구조로 저장되어 있는지 화면에 띄움
+                            st.info(f"🔍 디버깅 정보:\n- 문서 내 필드: {list(doc_data.keys()) if doc_data else '없음'}\n- 하위 폴더(컬렉션): {sub_cols if sub_cols else '없음'}")
             else:
                 st.info("저장된 daily_snapshots가 없습니다.")
         except Exception as e:

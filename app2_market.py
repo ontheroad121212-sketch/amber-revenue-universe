@@ -557,10 +557,11 @@ with st.sidebar:
 
     if db_hotel:
         try:
-            # 최근 30개의 스냅샷 리스트 가져오기
+            # 💡 [에러 수정] '__name__'을 사용하여 문서 ID(날짜) 기준으로 내림차순 정렬
             snap_docs = db_hotel.collection('daily_snapshots').order_by(
-                firestore.Query.document_id(), direction=firestore.Query.DESCENDING
+                '__name__', direction=firestore.Query.DESCENDING
             ).limit(30).stream()
+            
             snap_list = [doc.id for doc in snap_docs]
             
             if snap_list:

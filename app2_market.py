@@ -550,27 +550,57 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # [2] 파일 업로드 + 저장 (⭐ 날짜별 덮어쓰기)
-    uploaded_files = st.file_uploader("새 OTB 파일 업로드", type=['csv', 'xlsx'], accept_multiple_files=True)
-    if uploaded_files:
-        parsed_df = parse_uploaded_files(uploaded_files)
-        if not parsed_df.empty:
-            st.session_state['otb_data'] = parsed_df
-            st.success(f"✅ {len(parsed_df)}일치 데이터 로드")
-
-            if st.button("📤 클라우드에 저장 (날짜별 덮어쓰기)", use_container_width=True):
-                with st.spinner("업로드 중..."):
-                    ok, msg = save_otb_to_firebase(parsed_df)
-                    if ok:
-                        st.success(f"🚀 {msg}")
-                        st.cache_data.clear()
-                    else:
-                        st.error(f"저장 실패: {msg}")
-
+    # [2] 요약 OTB (전략사령부용) 스냅샷 불러오기 (파일 업로드 대체)
     st.markdown("---")
-    if st.button("🔄 캐시 초기화", use_container_width=True):
-        st.cache_data.clear()
-        st.rerun()
+    st.markdown("### 📊 요약 OTB 데이터 연동")
+    st.caption("타 앱에서 매일 자동 저장되는 daily_snapshots를 불러옵니다.")
+
+    if db_hotel:
+        try:
+            # 최근 30개의 스냅샷 리스트 가져오기
+            snap_docs = db_hotel.collection('daily_snapshots').order_by(
+                firestore.Query.document_id(), direction=firestore.Query.DESCENDING
+            ).limit(30).stream()
+            snap_list = [doc.id for doc in snap_docs]
+            
+            if snap_list:
+                sel_snap = st.selectbox("불러올 기준일자 선택", snap_list)
+                if st.button("📥 전략사령부에 OTB 적용", use_container_width=True, type="primary"):
+                    with st.spinner("데이터 로드 중..."):
+                        import json
+                        doc_data = db_hotel.collection('daily_snapshots').document(sel_snap).get().to_dict()
+                        
+                        if doc_data and 'json_data' in doc_data:
+                            try:
+                                j_data = json.loads(doc_data['json_data'])
+                                df_snap = pd.DataFrame(j_data)
+                                
+                                # 💡 이미지 구조(REV, RMS, DateStr)를 App2 표준(otb_revenue, rooms_sold, date)으로 매핑
+                                if 'DateStr' in df_snap.columns:
+                                    df_snap['date'] = pd.to_datetime(df_snap['DateStr']).dt.normalize()
+                                elif 'Date' in df_snap.columns:
+                                    df_snap['date'] = pd.to_datetime(df_snap['Date']).dt.normalize()
+                                
+                                if 'REV' in df_snap.columns:
+                                    df_snap['otb_revenue'] = pd.to_numeric(df_snap['REV'], errors='coerce').fillna(0)
+                                if 'RMS' in df_snap.columns:
+                                    df_snap['rooms_sold'] = pd.to_numeric(df_snap['RMS'], errors='coerce').fillna(0)
+                                
+                                # 세션에 저장
+                                st.session_state['otb_data'] = normalize_otb_columns(df_snap)
+                                st.success(f"✅ {sel_snap} 데이터가 전략사령부에 적용되었습니다!")
+                                time.sleep(1)
+                                st.rerun()
+                            except Exception as e:
+                                st.error(f"데이터 파싱 실패: {e}")
+                        else:
+                            st.warning("선택한 날짜에 json_data가 없습니다.")
+            else:
+                st.info("저장된 daily_snapshots가 없습니다.")
+        except Exception as e:
+            st.error(f"스냅샷 목록 로드 실패: {e}")
+    else:
+        st.error("db_hotel에 연결되지 않았습니다.")
 
     # -------------------------------------------------------------------------
     # 글로벌 데이터 타임머신

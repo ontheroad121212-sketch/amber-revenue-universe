@@ -550,19 +550,15 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # [2] 요약 OTB (전략사령부용) 스냅샷 불러오기 (파일 업로드 대체)
-    st.markdown("---")
-    st.markdown("### 📊 요약 OTB 데이터 연동")
-    st.caption("타 앱에서 매일 자동 저장되는 daily_snapshots를 불러옵니다.")
-
+    # [2] 요약 OTB (전략사령부용) 스냅샷 불러오기
     if db_hotel:
         try:
-            # 💡 [에러 수정] '__name__'을 사용하여 문서 ID(날짜) 기준으로 내림차순 정렬
-            snap_docs = db_hotel.collection('daily_snapshots').order_by(
-                '__name__', direction=firestore.Query.DESCENDING
-            ).limit(30).stream()
+            # 💡 [근본 해결] 서버(Firestore)에 정렬을 맡기지 않고, 전체 목록을 가져온 뒤 파이썬에서 정렬합니다.
+            # 이렇게 하면 인덱스 에러가 절대 나지 않습니다.
+            docs = db_hotel.collection('daily_snapshots').stream()
             
-            snap_list = [doc.id for doc in snap_docs]
+            # 문서 ID(날짜) 리스트를 가져와서 파이썬의 sorted() 함수로 내림차순 정렬
+            snap_list = sorted([doc.id for doc in docs], reverse=True)[:30] # 최신 30개만 선택
             
             if snap_list:
                 sel_snap = st.selectbox("불러올 기준일자 선택", snap_list)
@@ -576,7 +572,7 @@ with st.sidebar:
                                 j_data = json.loads(doc_data['json_data'])
                                 df_snap = pd.DataFrame(j_data)
                                 
-                                # 💡 이미지 구조(REV, RMS, DateStr)를 App2 표준(otb_revenue, rooms_sold, date)으로 매핑
+                                # 데이터 매핑 로직 (동일)
                                 if 'DateStr' in df_snap.columns:
                                     df_snap['date'] = pd.to_datetime(df_snap['DateStr']).dt.normalize()
                                 elif 'Date' in df_snap.columns:
@@ -587,7 +583,6 @@ with st.sidebar:
                                 if 'RMS' in df_snap.columns:
                                     df_snap['rooms_sold'] = pd.to_numeric(df_snap['RMS'], errors='coerce').fillna(0)
                                 
-                                # 세션에 저장
                                 st.session_state['otb_data'] = normalize_otb_columns(df_snap)
                                 st.success(f"✅ {sel_snap} 데이터가 전략사령부에 적용되었습니다!")
                                 time.sleep(1)
@@ -600,8 +595,6 @@ with st.sidebar:
                 st.info("저장된 daily_snapshots가 없습니다.")
         except Exception as e:
             st.error(f"스냅샷 목록 로드 실패: {e}")
-    else:
-        st.error("db_hotel에 연결되지 않았습니다.")
 
     # -------------------------------------------------------------------------
     # 글로벌 데이터 타임머신

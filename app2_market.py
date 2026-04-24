@@ -1664,9 +1664,9 @@ with tab7:
         if db_hotel:
             with st.spinner("최근 2일치 팩트체크 데이터 분석 중..."):
                 try:
-                    # 최신 2개 스냅샷 문서 가져오기 (어제 vs 오늘)
-                    snap_docs = db_hotel.collection('daily_snapshots').order_by('__name__', direction=firestore.Query.DESCENDING).limit(2).stream()
-                    snaps = [doc.id for doc in snap_docs]
+                    # 💡 [인덱스 에러 해결] 파이어베이스 정렬 대신 파이썬 내부 정렬 사용
+                    docs = db_hotel.collection('daily_snapshots').stream()
+                    snaps = sorted([doc.id for doc in docs], reverse=True)[:2]
                     
                     if len(snaps) == 2:
                         d1_id, d2_id = snaps[0], snaps[1] # d1: 최신(오늘), d2: 직전(어제)

@@ -1659,96 +1659,102 @@ with tab7:
         # ==============================================================
         st.markdown("---")
         st.subheader("📈 데일리 팩트체크(Fact-Check) 기반 동적 픽업")
-        st.caption("가장 최근 저장된 2일간의 OTB 스냅샷을 비교하여 실시간 픽업(예약 변동량) 속도를 시각화합니다.")
+        st.caption("실제 데이터가 존재하는 최신 OTB 스냅샷 2일 치를 자동 추적하여 실시간 픽업(예약 변동량) 속도를 시각화합니다.")
         
         if db_hotel:
-            with st.spinner("최근 2일치 팩트체크 데이터 분석 중..."):
+            with st.spinner("유효한 팩트체크 데이터 탐색 중..."):
                 try:
-                    # 인덱스 에러 방지 정렬
                     docs = db_hotel.collection('daily_snapshots').stream()
-                    snaps = sorted([doc.id for doc in docs], reverse=True)[:2]
+                    snap_list = sorted([doc.id for doc in docs], reverse=True)
                     
-                    if len(snaps) == 2:
-                        d1_id, d2_id = snaps[0], snaps[1] # d1: 최신(오늘), d2: 직전(어제)
-                        
-                        def get_snap_df_for_factcheck(snap_id):
-                            doc_data = db_hotel.collection('daily_snapshots').document(snap_id).get().to_dict() or {}
-                            for f in ['json_data', 'data', 'pms_data', 'otb_data']:
-                                if f in doc_data:
-                                    try: return pd.DataFrame(json.loads(doc_data[f]) if isinstance(doc_data[f], str) else doc_data[f])
-                                    except: pass
-                            all_sub = []
-                            for sub in db_hotel.collection('daily_snapshots').document(snap_id).collections():
-                                for s_doc in sub.stream():
-                                    s_data = s_doc.to_dict()
-                                    for f in ['json_data', 'data', 'pms_data', 'otb_data']:
-                                        if f in s_data:
-                                            try: all_sub.append(pd.DataFrame(json.loads(s_data[f]) if isinstance(s_data[f], str) else s_data[f]))
-                                            except: pass
-                            if all_sub: return pd.concat(all_sub, ignore_index=True)
-                            return pd.DataFrame()
+                    def get_snap_df_for_factcheck(snap_id):
+                        doc_ref = db_hotel.collection('daily_snapshots').document(snap_id)
+                        doc_data = doc_ref.get().to_dict() or {}
+                        all_dfs = []
+                        # 1. 문서 루트 탐색
+                        for f in ['json_data', 'data', 'pms_data', 'otb_data']:
+                            if f in doc_data:
+                                try: all_dfs.append(pd.DataFrame(json.loads(doc_data[f]) if isinstance(doc_data[f], str) else doc_data[f]))
+                                except: pass
+                        # 2. 하위 컬렉션 탐색
+                        for sub in doc_ref.collections():
+                            for s_doc in sub.stream():
+                                s_data = s_doc.to_dict() or {}
+                                for f in ['json_data', 'data', 'pms_data', 'otb_data']:
+                                    if f in s_data:
+                                        try: all_dfs.append(pd.DataFrame(json.loads(s_data[f]) if isinstance(s_data[f], str) else s_data[f]))
+                                        except: pass
+                        if all_dfs: return pd.concat(all_dfs, ignore_index=True)
+                        return pd.DataFrame()
 
-                        df_d1 = get_snap_df_for_factcheck(d1_id)
-                        df_d2 = get_snap_df_for_factcheck(d2_id)
-                        
-                        if not df_d1.empty and not df_d2.empty:
-                            for df_tmp in [df_d1, df_d2]:
-                                # 💡 1970년 타임스탬프 뭉침 버그 완벽 방어 로직 추가
-                                date_col = None
-                                for c in ['DateStr', 'Date', 'date', 'Stay_Date']:
-                                    if c in df_tmp.columns:
-                                        date_col = c
-                                        break
-                                
-                                if date_col:
-                                    if pd.api.types.is_numeric_dtype(df_tmp[date_col]):
-                                        df_tmp['date'] = pd.to_datetime(df_tmp[date_col], unit='ms', errors='coerce')
-                                    else:
-                                        df_tmp['date'] = pd.to_datetime(df_tmp[date_col], errors='coerce')
-                                        
-                                    mask_1970 = df_tmp['date'].dt.year == 1970
-                                    if mask_1970.any():
-                                        df_tmp.loc[mask_1970, 'date'] = pd.to_datetime(pd.to_numeric(df_tmp.loc[mask_1970, date_col], errors='coerce'), unit='ms', errors='coerce')
-                                        
-                                    df_tmp['date'] = df_tmp['date'].dt.strftime('%Y-%m-%d')
-                                
-                                # RMS/RN 매핑
-                                if 'RMS' in df_tmp.columns: df_tmp['rn'] = pd.to_numeric(df_tmp['RMS'], errors='coerce').fillna(0)
-                                elif 'Daily_RN' in df_tmp.columns: df_tmp['rn'] = pd.to_numeric(df_tmp['Daily_RN'], errors='coerce').fillna(0)
-                                else: df_tmp['rn'] = 0
+                    # 💡 [핵심] 빈 껍데기 폴더는 무시하고, '진짜 데이터가 있는' 스냅샷 2개를 찾을 때까지 스캔합니다.
+                    valid_snaps = {}
+                    for snap_id in snap_list:
+                        if len(valid_snaps) >= 2: break  # 2개를 찾으면 탐색 종료
+                        df_tmp = get_snap_df_for_factcheck(snap_id)
+                        if not df_tmp.empty:
+                            valid_snaps[snap_id] = df_tmp
                             
-                            if 'date' in df_d1.columns and 'date' in df_d2.columns:
-                                df_d1 = df_d1.dropna(subset=['date']).groupby('date')['rn'].sum().reset_index().rename(columns={'rn': 'rn_today'})
-                                df_d2 = df_d2.dropna(subset=['date']).groupby('date')['rn'].sum().reset_index().rename(columns={'rn': 'rn_yest'})
-                                
-                                df_fact = pd.merge(df_d1, df_d2, on='date', how='outer').fillna(0)
-                                df_fact['pickup'] = df_fact['rn_today'] - df_fact['rn_yest']
-                                
-                                # 오늘 기준 60일 데이터
-                                today_str = datetime.now().strftime('%Y-%m-%d')
-                                df_fact = df_fact[df_fact['date'] >= today_str].sort_values('date').head(60)
-                                
-                                if not df_fact.empty:
-                                    fig_fact = make_subplots(specs=[[{"secondary_y": True}]])
-                                    fig_fact.add_trace(go.Bar(x=df_fact['date'], y=df_fact['pickup'], name='일일 픽업 (Fact-Check)', marker_color='#ff7f0e'), secondary_y=False)
-                                    fig_fact.add_trace(go.Scatter(x=df_fact['date'], y=df_fact['rn_today'], name=f'현재 OTB ({d1_id})', mode='lines+markers', line=dict(color='#1f77b4', width=2)), secondary_y=True)
-                                    
-                                    fig_fact.update_layout(title=f"실시간 팩트체크: {d2_id} 대비 {d1_id} 예약 순변동량", height=450, hovermode='x unified')
-                                    st.plotly_chart(fig_fact, use_container_width=True)
-                                    
-                                    total_pickup = df_fact['pickup'].sum()
-                                    if total_pickup > 0:
-                                        st.success(f"💡 **팩트체크 결론:** 하루 동안 향후 60일 기간에 총 **{int(total_pickup):+,}박**의 순예약(Net Pickup)이 유입되었습니다. 프로모션 반응이 긍정적입니다.")
-                                    else:
-                                        st.warning(f"💡 **팩트체크 결론:** 하루 동안 향후 60일 기간의 순예약이 **{int(total_pickup):+,}박**입니다. 취소 방어 또는 수요 촉진 전략이 필요합니다.")
+                    if len(valid_snaps) == 2:
+                        snap_keys = list(valid_snaps.keys())
+                        d1_id, d2_id = snap_keys[0], snap_keys[1]  # d1: 최신(오늘), d2: 직전(어제)
+                        df_d1, df_d2 = valid_snaps[d1_id], valid_snaps[d2_id]
+                        
+                        for df_tmp in [df_d1, df_d2]:
+                            # 날짜 버그 방어
+                            date_col = None
+                            for c in ['DateStr', 'Date', 'date', 'Stay_Date']:
+                                if c in df_tmp.columns:
+                                    date_col = c
+                                    break
+                            
+                            if date_col:
+                                if pd.api.types.is_numeric_dtype(df_tmp[date_col]):
+                                    df_tmp['date'] = pd.to_datetime(df_tmp[date_col], unit='ms', errors='coerce')
                                 else:
-                                    st.warning("미래(오늘 이후)의 예약 데이터가 없거나 날짜 변환에 실패했습니다.")
+                                    df_tmp['date'] = pd.to_datetime(df_tmp[date_col], errors='coerce')
+                                    
+                                mask_1970 = df_tmp['date'].dt.year == 1970
+                                if mask_1970.any():
+                                    df_tmp.loc[mask_1970, 'date'] = pd.to_datetime(pd.to_numeric(df_tmp.loc[mask_1970, date_col], errors='coerce'), unit='ms', errors='coerce')
+                                    
+                                df_tmp['date'] = df_tmp['date'].dt.strftime('%Y-%m-%d')
+                            
+                            # 객실수 매핑
+                            if 'RMS' in df_tmp.columns: df_tmp['rn'] = pd.to_numeric(df_tmp['RMS'], errors='coerce').fillna(0)
+                            elif 'Daily_RN' in df_tmp.columns: df_tmp['rn'] = pd.to_numeric(df_tmp['Daily_RN'], errors='coerce').fillna(0)
+                            else: df_tmp['rn'] = 0
+                            
+                        if 'date' in df_d1.columns and 'date' in df_d2.columns:
+                            df_d1 = df_d1.dropna(subset=['date']).groupby('date')['rn'].sum().reset_index().rename(columns={'rn': 'rn_today'})
+                            df_d2 = df_d2.dropna(subset=['date']).groupby('date')['rn'].sum().reset_index().rename(columns={'rn': 'rn_yest'})
+                            
+                            df_fact = pd.merge(df_d1, df_d2, on='date', how='outer').fillna(0)
+                            df_fact['pickup'] = df_fact['rn_today'] - df_fact['rn_yest']
+                            
+                            # 오늘 기준 미래 60일 팩트체크
+                            today_str = datetime.now().strftime('%Y-%m-%d')
+                            df_fact = df_fact[df_fact['date'] >= today_str].sort_values('date').head(60)
+                            
+                            if not df_fact.empty:
+                                fig_fact = make_subplots(specs=[[{"secondary_y": True}]])
+                                fig_fact.add_trace(go.Bar(x=df_fact['date'], y=df_fact['pickup'], name='일일 픽업 (Fact-Check)', marker_color='#ff7f0e'), secondary_y=False)
+                                fig_fact.add_trace(go.Scatter(x=df_fact['date'], y=df_fact['rn_today'], name=f'현재 OTB ({d1_id})', mode='lines+markers', line=dict(color='#1f77b4', width=2)), secondary_y=True)
+                                
+                                fig_fact.update_layout(title=f"실시간 팩트체크: {d2_id} 대비 {d1_id} 예약 순변동량", height=450, hovermode='x unified')
+                                st.plotly_chart(fig_fact, use_container_width=True)
+                                
+                                total_pickup = df_fact['pickup'].sum()
+                                if total_pickup > 0:
+                                    st.success(f"💡 **팩트체크 결론:** 하루 동안 향후 60일 기간에 총 **{int(total_pickup):+,}박**의 순예약(Net Pickup)이 유입되었습니다. 프로모션 반응이 긍정적입니다.")
+                                else:
+                                    st.warning(f"💡 **팩트체크 결론:** 하루 동안 향후 60일 기간의 순예약이 **{int(total_pickup):+,}박**입니다. 취소 방어 또는 수요 촉진 전략이 필요합니다.")
                             else:
-                                st.warning("데이터에 날짜(Date/DateStr) 컬럼이 존재하지 않습니다.")
+                                st.warning(f"미래(오늘 {today_str} 이후)의 예약 데이터가 없습니다.")
                         else:
-                            st.warning("선택된 스냅샷 중 일부 데이터가 비어 있습니다.")
+                            st.warning("데이터에 날짜 컬럼이 존재하지 않습니다.")
                     else:
-                        st.info("비교할 과거 스냅샷 데이터가 부족합니다. (최소 2일치 누적 필요)")
+                        st.warning(f"비교할 유효한 스냅샷을 2개 이상 찾지 못했습니다. (발견된 유효 스냅샷: {list(valid_snaps.keys())})")
                 except Exception as e:
                     st.warning(f"팩트체크 데이터 로드 실패: {e}")
 

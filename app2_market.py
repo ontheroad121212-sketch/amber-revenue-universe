@@ -550,110 +550,27 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # [2] 요약 OTB (전략사령부용) 스냅샷 불러오기 (파일 업로드 대체)
+    # [2] 요약 OTB 데이터 연동 (초경량화 버전)
     st.markdown("---")
-    st.markdown("### 📊 요약 OTB 데이터 연동")
-    st.caption("타 앱에서 매일 자동 저장되는 daily_snapshots를 불러옵니다.")
+    st.markdown("### 📊 마스터 OTB 연동")
 
-    if db_hotel:
-        try:
-            docs = db_hotel.collection('daily_snapshots').stream()
-            snap_list = sorted([doc.id for doc in docs], reverse=True)[:30]
+    if st.button("📥 데이터 동기화", use_container_width=True, type="primary"):
+        with st.spinner("정제된 데이터 로드 중..."):
+            # 복잡하게 폴더를 뒤질 필요 없이, 백엔드가 예쁘게 만들어둔 문서 딱 하나만 읽어옵니다.
+            doc = db_hotel.collection('hotel_analytics_clean').document('master_view').get()
             
-            if snap_list:
-                sel_snap = st.selectbox("불러올 기준일자 선택", snap_list)
+            if doc.exists:
+                clean_data = doc.to_dict().get('data', [])
+                df_snap = pd.DataFrame(clean_data)
+                df_snap['date'] = pd.to_datetime(df_snap['date'])
                 
-                if st.button("📥 전략사령부에 OTB 적용", use_container_width=True, type="primary"):
-                    with st.spinner(f"{sel_snap} 데이터 스캔 및 로드 중..."):
-                        import json
-                        
-                        doc_ref = db_hotel.collection('daily_snapshots').document(sel_snap)
-                        doc_doc = doc_ref.get()
-                        doc_data = doc_doc.to_dict() if doc_doc.exists else {}
-                        
-                        all_dfs = []
-                        field_cands = ['json_data', 'data', 'pms_data', 'otb_data', 'raw_data']
-                        
-                        # 1. 문서 루트 필드 탐색
-                        for f in field_cands:
-                            if doc_data and f in doc_data:
-                                try:
-                                    parsed = json.loads(doc_data[f]) if isinstance(doc_data[f], str) else doc_data[f]
-                                    if parsed: all_dfs.append(pd.DataFrame(parsed))
-                                except: pass
-                        
-                        # 2. 모든 하위 폴더(컬렉션) 자동 탐색 (month 포함)
-                        sub_cols = [sub.id for sub in doc_ref.collections()]
-                        for sub_name in sub_cols:
-                            try:
-                                sub_docs = doc_ref.collection(sub_name).stream()
-                                for s_doc in sub_docs:
-                                    s_data = s_doc.to_dict() or {}
-                                    for f in field_cands:
-                                        if f in s_data:
-                                            try:
-                                                parsed = json.loads(s_data[f]) if isinstance(s_data[f], str) else s_data[f]
-                                                if parsed: all_dfs.append(pd.DataFrame(parsed))
-                                            except: pass
-                            except: pass
-                        
-                        if all_dfs:
-                            df_snap = pd.concat(all_dfs, ignore_index=True)
-                            
-                            # ==========================================
-                            # 🚀 1970년 뭉침 버그 완벽 방어 (타임스탬프 처리)
-                            # ==========================================
-                            date_col = None
-                            for c in ['DateStr', 'Date', 'date', '입실일자', 'Stay_Date']:
-                                if c in df_snap.columns:
-                                    date_col = c
-                                    break
-                            
-                            if date_col:
-                                # 숫자로 된 시간(밀리초)이면 unit='ms' 적용
-                                if pd.api.types.is_numeric_dtype(df_snap[date_col]):
-                                    df_snap['date'] = pd.to_datetime(df_snap[date_col], unit='ms', errors='coerce')
-                                else:
-                                    df_snap['date'] = pd.to_datetime(df_snap[date_col], errors='coerce')
-                                
-                                # 문자열이었는데 1970년으로 잘못 파싱된 경우 강제 재교정
-                                mask_1970 = df_snap['date'].dt.year == 1970
-                                if mask_1970.any():
-                                    df_snap.loc[mask_1970, 'date'] = pd.to_datetime(
-                                        pd.to_numeric(df_snap.loc[mask_1970, date_col], errors='coerce'), 
-                                        unit='ms', errors='coerce'
-                                    )
-                            
-                            # 날짜가 변환 안 된 쓰레기 값 제거
-                            df_snap = df_snap.dropna(subset=['date'])
-                            df_snap['date'] = df_snap['date'].dt.normalize()
-                            
-                            # 매출 및 객실수 표준 포맷 변환
-                            if 'REV' in df_snap.columns:
-                                df_snap['otb_revenue'] = pd.to_numeric(df_snap['REV'], errors='coerce').fillna(0)
-                            elif 'Daily_Rev' in df_snap.columns:
-                                df_snap['otb_revenue'] = pd.to_numeric(df_snap['Daily_Rev'], errors='coerce').fillna(0)
-                                
-                            if 'RMS' in df_snap.columns:
-                                df_snap['rooms_sold'] = pd.to_numeric(df_snap['RMS'], errors='coerce').fillna(0)
-                            elif 'Daily_RN' in df_snap.columns:
-                                df_snap['rooms_sold'] = pd.to_numeric(df_snap['Daily_RN'], errors='coerce').fillna(0)
-                                
-                            # 세션 덮어쓰기
-                            st.session_state['otb_data'] = normalize_otb_columns(df_snap)
-                            st.success(f"✅ {sel_snap} 스냅샷 (총 {len(df_snap)}일치 데이터) 적용 완료!")
-                            time.sleep(1)
-                            st.rerun()
-                        else:
-                            st.warning(f"⚠️ {sel_snap}에서 데이터를 찾지 못했습니다.")
-                            # 💡 디버깅 힌트: 실제 어떤 구조로 저장되어 있는지 화면에 띄움
-                            st.info(f"🔍 디버깅 정보:\n- 문서 내 필드: {list(doc_data.keys()) if doc_data else '없음'}\n- 하위 폴더(컬렉션): {sub_cols if sub_cols else '없음'}")
+                # 1970년 에러 수정, 단체 껍데기 제거 등은 이미 백엔드가 다 해놨으므로 바로 세션에 넣습니다.
+                st.session_state['otb_data'] = df_snap
+                st.success("✅ 정수된 마스터 데이터 로드 완료! (로딩 시간 0.1초)")
+                time.sleep(1)
+                st.rerun()
             else:
-                st.info("저장된 daily_snapshots가 없습니다.")
-        except Exception as e:
-            st.error(f"스냅샷 목록 로드 실패: {e}")
-    else:
-        st.error("db_hotel에 연결되지 않았습니다.")
+                st.error("아직 백엔드(ETL)에서 정제된 데이터가 생성되지 않았습니다.")
 
     # -------------------------------------------------------------------------
     # 글로벌 데이터 타임머신

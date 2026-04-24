@@ -550,51 +550,67 @@ with st.sidebar:
 
     st.markdown("---")
 
-    # [2] 요약 OTB (전략사령부용) 스냅샷 불러오기
+    # [2] 요약 OTB (전략사령부용) 스냅샷 불러오기 (파일 업로드 대체)
+    st.markdown("---")
+    st.markdown("### 📊 요약 OTB 데이터 연동")
+    st.caption("타 앱에서 매일 자동 저장되는 daily_snapshots를 불러옵니다.")
+
     if db_hotel:
         try:
-            # 💡 [근본 해결] 서버(Firestore)에 정렬을 맡기지 않고, 전체 목록을 가져온 뒤 파이썬에서 정렬합니다.
-            # 이렇게 하면 인덱스 에러가 절대 나지 않습니다.
+            # 스냅샷 날짜(문서 ID) 목록 가져오기
             docs = db_hotel.collection('daily_snapshots').stream()
-            
-            # 문서 ID(날짜) 리스트를 가져와서 파이썬의 sorted() 함수로 내림차순 정렬
-            snap_list = sorted([doc.id for doc in docs], reverse=True)[:30] # 최신 30개만 선택
+            snap_list = sorted([doc.id for doc in docs], reverse=True)[:30]
             
             if snap_list:
                 sel_snap = st.selectbox("불러올 기준일자 선택", snap_list)
+                
                 if st.button("📥 전략사령부에 OTB 적용", use_container_width=True, type="primary"):
-                    with st.spinner("데이터 로드 중..."):
+                    with st.spinner(f"{sel_snap} 데이터(1~12월) 병합 및 로드 중..."):
                         import json
-                        doc_data = db_hotel.collection('daily_snapshots').document(sel_snap).get().to_dict()
                         
-                        if doc_data and 'json_data' in doc_data:
-                            try:
-                                j_data = json.loads(doc_data['json_data'])
-                                df_snap = pd.DataFrame(j_data)
+                        # 💡 [핵심] 선택한 날짜 안의 'month' 하위 폴더(컬렉션)에 있는 1월~12월 문서를 전부 가져옵니다.
+                        month_docs = db_hotel.collection('daily_snapshots').document(sel_snap).collection('month').stream()
+                        
+                        all_dfs = []
+                        for m_doc in month_docs:
+                            doc_data = m_doc.to_dict()
+                            if doc_data and 'json_data' in doc_data:
+                                try:
+                                    j_data = json.loads(doc_data['json_data'])
+                                    df_month = pd.DataFrame(j_data)
+                                    all_dfs.append(df_month)
+                                except Exception as e:
+                                    st.warning(f"{m_doc.id}월 데이터 파싱 오류: {e}")
+                        
+                        if all_dfs:
+                            # 1월부터 12월까지의 데이터를 1개의 거대한 데이터프레임으로 합침
+                            df_snap = pd.concat(all_dfs, ignore_index=True)
+                            
+                            # 💡 이미지 구조(REV, RMS, DateStr)를 App2 표준(otb_revenue, rooms_sold, date)으로 매핑
+                            if 'DateStr' in df_snap.columns:
+                                df_snap['date'] = pd.to_datetime(df_snap['DateStr']).dt.normalize()
+                            elif 'Date' in df_snap.columns:
+                                df_snap['date'] = pd.to_datetime(df_snap['Date']).dt.normalize()
                                 
-                                # 데이터 매핑 로직 (동일)
-                                if 'DateStr' in df_snap.columns:
-                                    df_snap['date'] = pd.to_datetime(df_snap['DateStr']).dt.normalize()
-                                elif 'Date' in df_snap.columns:
-                                    df_snap['date'] = pd.to_datetime(df_snap['Date']).dt.normalize()
+                            if 'REV' in df_snap.columns:
+                                df_snap['otb_revenue'] = pd.to_numeric(df_snap['REV'], errors='coerce').fillna(0)
+                            if 'RMS' in df_snap.columns:
+                                df_snap['rooms_sold'] = pd.to_numeric(df_snap['RMS'], errors='coerce').fillna(0)
                                 
-                                if 'REV' in df_snap.columns:
-                                    df_snap['otb_revenue'] = pd.to_numeric(df_snap['REV'], errors='coerce').fillna(0)
-                                if 'RMS' in df_snap.columns:
-                                    df_snap['rooms_sold'] = pd.to_numeric(df_snap['RMS'], errors='coerce').fillna(0)
-                                
-                                st.session_state['otb_data'] = normalize_otb_columns(df_snap)
-                                st.success(f"✅ {sel_snap} 데이터가 전략사령부에 적용되었습니다!")
-                                time.sleep(1)
-                                st.rerun()
-                            except Exception as e:
-                                st.error(f"데이터 파싱 실패: {e}")
+                            # 세션에 저장 (전략사령부 등에서 활용)
+                            st.session_state['otb_data'] = normalize_otb_columns(df_snap)
+                            
+                            st.success(f"✅ {sel_snap} 스냅샷 (총 {len(all_dfs)}개월치, {len(df_snap)}일 데이터) 적용 완료!")
+                            time.sleep(1)
+                            st.rerun()
                         else:
-                            st.warning("선택한 날짜에 json_data가 없습니다.")
+                            st.warning(f"⚠️ {sel_snap} 폴더 안의 'month' 하위 컬렉션에 데이터가 없거나 json_data 필드를 찾지 못했습니다.")
             else:
                 st.info("저장된 daily_snapshots가 없습니다.")
         except Exception as e:
             st.error(f"스냅샷 목록 로드 실패: {e}")
+    else:
+        st.error("db_hotel에 연결되지 않았습니다.")
 
     # -------------------------------------------------------------------------
     # 글로벌 데이터 타임머신

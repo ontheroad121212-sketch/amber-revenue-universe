@@ -1552,6 +1552,44 @@ with tab7:
             else:
                 st.error(f"📉 주의: 매출이 **{int(diff_rev):+,}원** 감소 위험.")
 
+            # ==============================================================
+            # 🤖 [신규 추가] AI 최적가 추천 (Prescriptive ADR)
+            # ==============================================================
+            st.markdown("#### 🤖 AI 최적가 추천 (RevPAR 극대화)")
+            best_rev, best_raise, best_sold, best_adr = -1, 0, 0, 0
+            
+            # -10만원부터 +10만원까지 5000원 단위로 백그라운드 시뮬레이션
+            for test_raise in range(-100000, 100001, 5000):
+                test_adr = curr_adr_d + test_raise
+                if test_adr < MIN_LUXURY_ADR:
+                    damage_ratio = (MIN_LUXURY_ADR - test_adr) / MIN_LUXURY_ADR
+                    organic_impact_test = -natural_pickup * (damage_ratio * 2.0)
+                    new_market_demand_test = 0
+                else:
+                    price_ratio = test_adr / curr_adr_d if curr_adr_d > 0 else 1
+                    organic_impact_test = natural_pickup * (1 - (price_ratio ** elasticity))
+                    if comp_index > 0 and test_adr < comp_index:
+                        comp_advantage = (comp_index - test_adr) / comp_index
+                        new_market_demand_test = unsold_inventory * (comp_advantage * elasticity)
+                    else:
+                        new_market_demand_test = 0
+                        
+                adj_pickup_test = max(0, int(natural_pickup + organic_impact_test + new_market_demand_test))
+                scen_sold_test = min(TOTAL_ROOMS, curr_sold + adj_pickup_test)
+                scen_rev_test = (curr_sold * curr_adr_d) + (adj_pickup_test * test_adr)
+                
+                if scen_rev_test > best_rev:
+                    best_rev = scen_rev_test
+                    best_raise = test_raise
+                    best_sold = scen_sold_test
+                    best_adr = scen_rev_test / scen_sold_test if scen_sold_test > 0 else 0
+                    
+            if best_rev > baseline_rev:
+                st.success(f"✨ **AI 추천:** 잔여 객실({unsold_inventory}실)과 경쟁사 인덱스를 종합할 때, 요금을 **{best_raise:+,}원** 조정하는 것이 수익 극대화점입니다.")
+                st.info(f"👉 추천 전략 적용 시 예상 매출: **{int(best_rev):,}원** (현상 유지 대비 **{int(best_rev - baseline_rev):+,}원** 이득)")
+            else:
+                st.info("✨ **AI 추천:** 현재 요금(현상 유지)이 수익 극대화점입니다. 가격을 변동할 경우 오히려 전체 매출(RevPAR)이 하락할 수 있습니다.")
+
         st.markdown("---")
 
         # 5. 180일 종합 추세
@@ -1615,6 +1653,79 @@ with tab7:
             fig_dual.update_layout(title="매출(좌) vs 경쟁사(우)", height=500,
                                      yaxis2=dict(title="가격(원)", overlaying='y', side='right'))
             st.plotly_chart(fig_dual, use_container_width=True)
+
+        # ==============================================================
+        # 📈 [신규 추가] 데일리 팩트체크(Fact-Check) 기반 픽업 추적
+        # ==============================================================
+        st.markdown("---")
+        st.subheader("📈 데일리 팩트체크(Fact-Check) 기반 동적 픽업")
+        st.caption("가장 최근 저장된 2일간의 OTB 스냅샷을 비교하여 실시간 픽업(예약 변동량) 속도를 시각화합니다.")
+        
+        if db_hotel:
+            with st.spinner("최근 2일치 팩트체크 데이터 분석 중..."):
+                try:
+                    # 최신 2개 스냅샷 문서 가져오기 (어제 vs 오늘)
+                    snap_docs = db_hotel.collection('daily_snapshots').order_by('__name__', direction=firestore.Query.DESCENDING).limit(2).stream()
+                    snaps = [doc.id for doc in snap_docs]
+                    
+                    if len(snaps) == 2:
+                        d1_id, d2_id = snaps[0], snaps[1] # d1: 최신(오늘), d2: 직전(어제)
+                        
+                        def get_snap_df_for_factcheck(snap_id):
+                            doc_data = db_hotel.collection('daily_snapshots').document(snap_id).get().to_dict() or {}
+                            for f in ['json_data', 'data', 'pms_data']:
+                                if f in doc_data:
+                                    try: return pd.DataFrame(json.loads(doc_data[f]) if isinstance(doc_data[f], str) else doc_data[f])
+                                    except: pass
+                            all_sub = []
+                            for sub in db_hotel.collection('daily_snapshots').document(snap_id).collections():
+                                for s_doc in sub.stream():
+                                    s_data = s_doc.to_dict()
+                                    for f in ['json_data', 'data', 'pms_data']:
+                                        if f in s_data:
+                                            try: all_sub.append(pd.DataFrame(json.loads(s_data[f]) if isinstance(s_data[f], str) else s_data[f]))
+                                            except: pass
+                            if all_sub: return pd.concat(all_sub, ignore_index=True)
+                            return pd.DataFrame()
+
+                        df_d1 = get_snap_df_for_factcheck(d1_id)
+                        df_d2 = get_snap_df_for_factcheck(d2_id)
+                        
+                        if not df_d1.empty and not df_d2.empty:
+                            for df_tmp in [df_d1, df_d2]:
+                                if 'DateStr' in df_tmp.columns: df_tmp['date'] = pd.to_datetime(df_tmp['DateStr'], errors='coerce')
+                                elif 'Date' in df_tmp.columns: df_tmp['date'] = pd.to_datetime(df_tmp['Date'], errors='coerce')
+                                df_tmp['date'] = df_tmp['date'].dt.strftime('%Y-%m-%d')
+                                if 'RMS' in df_tmp.columns: df_tmp['rn'] = pd.to_numeric(df_tmp['RMS'], errors='coerce').fillna(0)
+                                elif 'Daily_RN' in df_tmp.columns: df_tmp['rn'] = pd.to_numeric(df_tmp['Daily_RN'], errors='coerce').fillna(0)
+                            
+                            df_d1 = df_d1.groupby('date')['rn'].sum().reset_index().rename(columns={'rn': 'rn_today'})
+                            df_d2 = df_d2.groupby('date')['rn'].sum().reset_index().rename(columns={'rn': 'rn_yest'})
+                            
+                            df_fact = pd.merge(df_d1, df_d2, on='date', how='outer').fillna(0)
+                            df_fact['pickup'] = df_fact['rn_today'] - df_fact['rn_yest']
+                            
+                            # 오늘 기준 향후 60일간의 팩트체크
+                            today_str = datetime.now().strftime('%Y-%m-%d')
+                            df_fact = df_fact[df_fact['date'] >= today_str].sort_values('date').head(60)
+                            
+                            if not df_fact.empty:
+                                fig_fact = make_subplots(specs=[[{"secondary_y": True}]])
+                                fig_fact.add_trace(go.Bar(x=df_fact['date'], y=df_fact['pickup'], name='일일 픽업 (Fact-Check)', marker_color='#ff7f0e'), secondary_y=False)
+                                fig_fact.add_trace(go.Scatter(x=df_fact['date'], y=df_fact['rn_today'], name=f'현재 OTB ({d1_id})', mode='lines+markers', line=dict(color='#1f77b4', width=2)), secondary_y=True)
+                                
+                                fig_fact.update_layout(title=f"실시간 팩트체크: {d2_id} 대비 {d1_id} 예약 순변동량", height=450, hovermode='x unified')
+                                st.plotly_chart(fig_fact, use_container_width=True)
+                                
+                                total_pickup = df_fact['pickup'].sum()
+                                if total_pickup > 0:
+                                    st.success(f"💡 **팩트체크 결론:** 하루 동안 향후 60일 기간에 총 **{int(total_pickup):+,}박**의 순예약(Net Pickup)이 유입되었습니다. 프로모션 반응이 긍정적입니다.")
+                                else:
+                                    st.warning(f"💡 **팩트체크 결론:** 하루 동안 향후 60일 기간의 순예약이 **{int(total_pickup):+,}박**입니다. 취소 방어 또는 수요 촉진 전략이 필요합니다.")
+                    else:
+                        st.info("비교할 과거 스냅샷 데이터가 부족합니다. (최소 2일치 누적 필요)")
+                except Exception as e:
+                    st.warning(f"팩트체크 데이터 로드 실패: {e}")
 
         st.download_button("📥 통합 데이터 다운로드", df_view.to_csv().encode('utf-8-sig'), "data.csv")
     else:

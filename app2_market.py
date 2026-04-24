@@ -1671,26 +1671,35 @@ with tab7:
                         doc_ref = db_hotel.collection('daily_snapshots').document(snap_id)
                         doc_data = doc_ref.get().to_dict() or {}
                         all_dfs = []
-                        # 1. 문서 루트 탐색
-                        for f in ['json_data', 'data', 'pms_data', 'otb_data']:
+                        field_cands = ['json_data', 'data', 'pms_data', 'otb_data', 'raw_data']
+                        
+                        # 1. 문서 루트 명시적 탐색
+                        for f in field_cands:
                             if f in doc_data:
-                                try: all_dfs.append(pd.DataFrame(json.loads(doc_data[f]) if isinstance(doc_data[f], str) else doc_data[f]))
+                                try: 
+                                    parsed = json.loads(doc_data[f]) if isinstance(doc_data[f], str) else doc_data[f]
+                                    if parsed: all_dfs.append(pd.DataFrame(parsed))
                                 except: pass
-                        # 2. 하위 컬렉션 탐색
-                        for sub in doc_ref.collections():
-                            for s_doc in sub.stream():
-                                s_data = s_doc.to_dict() or {}
-                                for f in ['json_data', 'data', 'pms_data', 'otb_data']:
-                                    if f in s_data:
-                                        try: all_dfs.append(pd.DataFrame(json.loads(s_data[f]) if isinstance(s_data[f], str) else s_data[f]))
+                                
+                        # 2. 💡 [핵심] 'month' 하위 폴더 명시적 직접 타겟팅 (사이드바와 동일한 성공 공식)
+                        try:
+                            month_docs = doc_ref.collection('month').stream()
+                            for m_doc in month_docs:
+                                m_data = m_doc.to_dict() or {}
+                                for f in field_cands:
+                                    if f in m_data:
+                                        try:
+                                            parsed = json.loads(m_data[f]) if isinstance(m_data[f], str) else m_data[f]
+                                            if parsed: all_dfs.append(pd.DataFrame(parsed))
                                         except: pass
+                        except: pass
+                        
                         if all_dfs: return pd.concat(all_dfs, ignore_index=True)
                         return pd.DataFrame()
 
-                    # 💡 [핵심] 빈 껍데기 폴더는 무시하고, '진짜 데이터가 있는' 스냅샷 2개를 찾을 때까지 스캔합니다.
                     valid_snaps = {}
                     for snap_id in snap_list:
-                        if len(valid_snaps) >= 2: break  # 2개를 찾으면 탐색 종료
+                        if len(valid_snaps) >= 2: break
                         df_tmp = get_snap_df_for_factcheck(snap_id)
                         if not df_tmp.empty:
                             valid_snaps[snap_id] = df_tmp

@@ -1122,21 +1122,43 @@ with tabs[0]:
         buildup_df = pd.DataFrame(columns=['date_only', 'rev_100m', 'ts'])
 
     # booking_pace_m 평탄화 — 현재월에만 일자 축 누적 의미
+    # 🔧 v5.6.1: 앞쪽 빈칸은 첫 유효값으로 backfill (0이 박히는 버그 수정)
     booking_pace_m = []
     velocity = 0
     cur_rev_sob = 0
     
     if daily_otb_dict and (is_current_month or is_past_month):
         actual_last_day = max(daily_otb_dict.keys())
-        last_val = 0
+        first_valid_day = min(daily_otb_dict.keys())
+        first_valid_val = daily_otb_dict[first_valid_day]
+        
+        # 첫 유효값 이전 일자는 그 값으로 backfill (0 점프 방지)
+        last_val = first_valid_val
         for d in range(1, actual_last_day + 1):
             if d in daily_otb_dict:
                 last_val = daily_otb_dict[d]
             booking_pace_m.append(last_val)
         
         cur_rev_sob = booking_pace_m[-1] * 100000000 if booking_pace_m else 0
-        if len(booking_pace_m) >= 8:
-            velocity = ((booking_pace_m[-1] - booking_pace_m[-8]) / 7) * 100000000
+        
+        # 🔧 Velocity 폴백: 8일치 미만이어도 가용 데이터로 일평균 픽업 추정
+        valid_points = sorted(daily_otb_dict.items())  # [(day, val), ...]
+        if len(valid_points) >= 2:
+            # 첫 백업 시점부터 마지막 시점까지의 일평균 증가분
+            first_day, first_val = valid_points[0]
+            last_day, last_val = valid_points[-1]
+            day_span = max(1, last_day - first_day)
+            
+            if len(valid_points) >= 8 and len(booking_pace_m) >= 8:
+                # 데이터 충분 → 정확한 7일 윈도우
+                velocity = ((booking_pace_m[-1] - booking_pace_m[-8]) / 7) * 100000000
+            else:
+                # 데이터 부족 → 가용 구간의 일평균 픽업 (간이 추정치)
+                velocity = ((last_val - first_val) / day_span) * 100000000
+        elif len(valid_points) == 1:
+            # 단 1개 데이터면 픽업 산출 불가 → 0 유지
+            velocity = 0
+            
     elif is_future_month and not buildup_df.empty:
         cur_rev_sob = buildup_df['rev_100m'].iloc[-1] * 100000000
         if len(buildup_df) >= 2:
@@ -1184,7 +1206,20 @@ with tabs[0]:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("순수 객실 매출 (OTB)", f"{int(cur_rev):,} 원")
     m2.metric("세이프존 기준점", f"{int(o_p[cur_idx]*100000000):,} 원" if cur_idx != -1 and is_current_month else "-")
-    m3.metric("최근 7일 일평균 픽업", f"{int(velocity):,} 원/일")
+    
+    # 🔧 v5.6.1: velocity 라벨 적응형 (데이터 부족 시 안내)
+    valid_count = len(daily_otb_dict) if daily_otb_dict else 0
+    if valid_count >= 8:
+        velocity_label = "최근 7일 일평균 픽업"
+        velocity_help = None
+    elif valid_count >= 2:
+        velocity_label = f"일평균 픽업 (간이, {valid_count}개 데이터)"
+        velocity_help = "백업 8회 누적 시 정확한 7일 윈도우로 전환"
+    else:
+        velocity_label = "일평균 픽업"
+        velocity_help = "백업 2회 이상 누적 필요"
+    m3.metric(velocity_label, f"{int(velocity):,} 원/일", help=velocity_help)
+    
     m4.metric("월말 예상 마감", f"{int(cur_rev / expected_pct):,} 원" if expected_pct > 0 else "-")
     
     c1, c2 = st.columns(2)

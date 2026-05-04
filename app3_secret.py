@@ -979,12 +979,16 @@ with st.sidebar.expander("📊 2026년 마스터 타겟 보드 (항시 열람)",
     })
     st.dataframe(styled_tgt, use_container_width=True)
 
-# 🚨 상단 지표 하드코딩 OTB 동기화
-FACT_DB_GLOBAL = {
-    4: {1: 666606568, 2: 680240552, 3: 683484877, 6: 706396340, 7: 713650569, 8: 725514271, 9: 732471320, 10: 729130460, 13: 752906651},
-    5: {1: 580174512, 2: 584284522, 3: 589896496, 6: 604640008, 7: 617226508, 8: 630307581, 9: 638878045, 10: 646880667, 13: 677498662},
-    6: {1: 317608189, 2: 323004791, 3: 325341332, 6: 329998237, 7: 336899555, 8: 354565622, 9: 355016508, 10: 357755106, 13: 360980571}
-}
+_kst_now_global = datetime.now(timezone(timedelta(hours=9))).replace(tzinfo=None)
+for m_fact in FACT_DB_GLOBAL:
+    # 현재월/미래월엔 절대 박지 않음 — Firebase/SOB 실데이터에 양보
+    if m_fact >= _kst_now_global.month:
+        continue
+    if m_fact in FACT_DB_GLOBAL and FACT_DB_GLOBAL[m_fact]:
+        max_v = max(FACT_DB_GLOBAL[m_fact].values())
+        if yearly_data_store[m_fact]['rev'] == 0:
+            yearly_data_store[m_fact]['rev'] = max_v
+            
 for m_fact in FACT_DB_GLOBAL:
     if m_fact in FACT_DB_GLOBAL and FACT_DB_GLOBAL[m_fact]:
         max_v = max(FACT_DB_GLOBAL[m_fact].values())
@@ -1072,36 +1076,59 @@ with tabs[0]:
     
     daily_otb_dict = {}
     
-    # 1. 하드코딩된 과거 데이터 베이스 깔기
-    if selected_month in FACT_DB:
+    # 1. 하드코딩 FACT_DB는 '이미 마감된 과거 월'에만 fallback으로 사용
+    kst_today = datetime.now(timezone(timedelta(hours=9))).replace(tzinfo=None)
+    is_past_month = (selected_month < kst_today.month) or \
+                    (selected_month == kst_today.month and kst_today.day == calendar.monthrange(2026, selected_month)[1])
+
+    if is_past_month and selected_month in FACT_DB:
         for day_k, val in FACT_DB[selected_month].items():
             daily_otb_dict[day_k] = val / 100000000
 
-    # 💡 2. [추가] Firebase 스냅샷 징검다리로 빈칸(14일~어제) 자동 복구!
+    # 💡 2. Firebase 스냅샷 징검다리 — 조회월 매출이 시간대별로 어떻게 쌓였는지 추적
+    otb_buildup = []  # [(다운로드 날짜, 그 시점의 조회월 매출)] — 2B 차트용
     if 'db_flight' in locals() and db_flight:
         try:
-            # 오름차순(과거->최신)으로 불러와 덮어쓰기 (같은 날 여러번 저장했어도 무조건 최신값이 남음)
             snaps = db_flight.collection('amber_snapshots').order_by('timestamp').stream()
             for doc in snaps:
                 d = doc.to_dict()
                 created_at_str = d.get('created_at', '')
                 if not created_at_str: continue
-                
-                dt = datetime.strptime(created_at_str, '%Y-%m-%d %H:%M:%S')
-                
-                # 스냅샷 저장월과 조회월이 같을 때만 추출
-                if dt.month == selected_month:
-                    sob_data = d.get('sob_data', {})
-                    str_m, int_m = str(selected_month), selected_month
-                    
-                    rev_val = 0
-                    if str_m in sob_data: rev_val = sob_data[str_m].get('rev', 0)
-                    elif int_m in sob_data: rev_val = sob_data[int_m].get('rev', 0)
-                    
-                    if rev_val > 0:
-                        daily_otb_dict[dt.day] = rev_val / 100000000
+            
+                try:
+                    dt = datetime.strptime(created_at_str, '%Y-%m-%d %H:%M:%S')
+                except:
+                    continue
+            
+                # 스냅샷에서 '조회월'의 매출을 꺼냄 (저장 시점은 무관)
+                sob_data = d.get('sob_data', {})
+                str_m, int_m = str(selected_month), selected_month
+            
+                rev_val = 0
+                if str_m in sob_data:
+                    rev_val = sob_data[str_m].get('rev', 0) if isinstance(sob_data[str_m], dict) else 0
+                elif int_m in sob_data:
+                    rev_val = sob_data[int_m].get('rev', 0) if isinstance(sob_data[int_m], dict) else 0
+            
+                if rev_val <= 0:
+                    continue
+            
+                # 2B 차트용: 다운로드 날짜 축에 점 찍기 (같은 날 여러번 저장 시 최신값)
+                otb_buildup.append((dt, rev_val / 100000000))
+            
+                # 2A 차트용: 조회월이 '현재월'일 때만 일자 축에 매핑
+                #   - 미래월 조회 시엔 일자 축에 의미가 없으므로 건너뜀 (평탄선 처리는 아래)
+                if dt.month == selected_month and dt.year == kst_today.year:
+                    daily_otb_dict[dt.day] = rev_val / 100000000
         except Exception:
             pass
+
+    # otb_buildup 정리: 같은 날짜 중복은 최신값(가장 큰 timestamp)만 남기기
+    if otb_buildup:
+        buildup_df = pd.DataFrame(otb_buildup, columns=['ts', 'rev_100m'])
+        buildup_df['date_only'] = buildup_df['ts'].dt.date
+        buildup_df = buildup_df.sort_values('ts').groupby('date_only').last().reset_index()
+        buildup_df = buildup_df.sort_values('date_only')
 
     # 3. 오늘 업로드한 최신 SOB 파일 덮어쓰기
     if sob_files:
@@ -1120,36 +1147,61 @@ with tabs[0]:
                 
                 if content_month == selected_month:
                     date_match = re.search(r'\d{8}', f.name)
-                    update_day = int(date_match.group()[-2:]) if date_match else curr_d
-                    
-                    max_val = 0
-                    for r_idx in range(len(raw_sob)):
-                        nums = [clean_numeric(x) for x in raw_sob.iloc[r_idx].values]
-                        if max(nums) > max_val: max_val = max(nums)
-                    
-                    if max_val > 100000000:
-                        daily_otb_dict[update_day] = max_val / 100000000
+                    if date_match:
+                        try:
+                            file_dt = datetime.strptime(date_match.group(), '%Y%m%d')
+                        except:
+                            file_dt = kst_today
+                   else:
+                       file_dt = kst_today
+    
+                   max_val = 0
+                   for r_idx in range(len(raw_sob)):
+                       nums = [clean_numeric(x) for x in raw_sob.iloc[r_idx].values]
+                       if max(nums) > max_val: max_val = max(nums)
+    
+                   if max_val > 100000000:
+                       rev_100m = max_val / 100000000
+                       # 2B 차트용: 다운로드 날짜 축에 추가
+                       otb_buildup.append((file_dt, rev_100m))
+                       # 2A 차트용: 조회월 == 현재월일 때만 일자에 박기
+                       if content_month == kst_today.month and file_dt.year == kst_today.year:
+                           daily_otb_dict[file_dt.day] = rev_100m
+
+                # otb_buildup 재정리 (SOB 추가분 반영)
+                if otb_buildup:
+                    buildup_df = pd.DataFrame(otb_buildup, columns=['ts', 'rev_100m'])
+                    buildup_df['date_only'] = buildup_df['ts'].dt.date
+                    buildup_df = buildup_df.sort_values('ts').groupby('date_only').last().reset_index()
+                    buildup_df = buildup_df.sort_values('date_only')
+                else:
+                    buildup_df = pd.DataFrame(columns=['date_only', 'rev_100m'])
             except: pass
 
     booking_pace_m = []
     velocity = 0
-    if daily_otb_dict:
+    cur_rev_sob = 0
+
+    # 현재월에만 일자 축 누적 페이스 의미가 있음
+    is_current_month = (selected_month == kst_today.month)
+
+    if daily_otb_dict and is_current_month:
         actual_last_day = max(daily_otb_dict.keys())
         last_val = 0
         for d in range(1, actual_last_day + 1):
             if d in daily_otb_dict:
-                current_val = daily_otb_dict[d]
-                # 💡 [핵심 수정] 20% 폭락 방어막 등 쓸데없는 제약 다 풀고 무조건 실제 취소액 반영
-                last_val = current_val
-            
-            # 중간에 데이터 없는 날짜는 가장 최근 값으로 평탄화
+                last_val = daily_otb_dict[d]
             booking_pace_m.append(last_val)
-        
+    
         cur_rev_sob = booking_pace_m[-1] * 100000000 if booking_pace_m else 0
         if len(booking_pace_m) >= 8:
             velocity = ((booking_pace_m[-1] - booking_pace_m[-8]) / 7) * 100000000
-    else:
-        cur_rev_sob = 0
+    elif not is_current_month and not buildup_df.empty:
+        # 미래월/과거월: build-up의 최신값을 현재 OTB로 사용
+        cur_rev_sob = buildup_df['rev_100m'].iloc[-1] * 100000000
+        if len(buildup_df) >= 2:
+            prev = buildup_df['rev_100m'].iloc[-2] * 100000000
+            velocity = (cur_rev_sob - prev)
 
     tgt_m = TARGET_DATA.get(selected_month, {"rev": 0, "rn": 0, "adr": 0, "occ": 0})
     tgt_rev_100m = tgt_m['rev'] / 100000000
@@ -1196,16 +1248,59 @@ with tabs[0]:
         st.plotly_chart(fig1.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=10)), use_container_width=True)
         
     with c2:
-        st.markdown("#### 2️⃣ 당월 확보 매출 궤도 (Booking Pace)")
-        fig2 = go.Figure()
-        fig2.add_trace(go.Scatter(x=t_dt, y=l_b, mode='lines', line_width=0, fill='tonexty', fillcolor='rgba(0,209,255,0.1)', name="Safe Zone"))
-        fig2.add_trace(go.Scatter(x=t_dt, y=o_p, name="Oracle S-Curve", line=dict(color="#00D1FF", width=2)))
-        if booking_pace_m: 
-            plot_x = t_dt[:len(booking_pace_m)]
-            fig2.add_trace(go.Scatter(x=plot_x, y=booking_pace_m, name="Actual (SOB)", line=dict(color="#FF4B4B", width=4)))
-        st.plotly_chart(fig2.update_layout(template="plotly_dark", height=300, margin=dict(l=10, r=10, t=30, b=10)), use_container_width=True)
-
-    c3, c4 = st.columns(2)
+        is_current_month = (selected_month == kst_today.month)
+    
+        if is_current_month:
+            # 2A: 현재월 — 조회월 일자 축으로 누적 페이스 보여주기
+            st.markdown("#### 2️⃣ 당월 확보 매출 궤도 (Booking Pace)")
+            fig2 = go.Figure()
+            fig2.add_trace(go.Scatter(x=t_dt, y=l_b, mode='lines', line_width=0, 
+                                       fill='tonexty', fillcolor='rgba(0,209,255,0.1)', name="Safe Zone"))
+            fig2.add_trace(go.Scatter(x=t_dt, y=o_p, name="Oracle S-Curve", 
+                                       line=dict(color="#00D1FF", width=2)))
+            if booking_pace_m: 
+                plot_x = t_dt[:len(booking_pace_m)]
+                fig2.add_trace(go.Scatter(x=plot_x, y=booking_pace_m, name="Actual (SOB)", 
+                                           line=dict(color="#FF4B4B", width=4)))
+            st.plotly_chart(fig2.update_layout(template="plotly_dark", height=300, 
+                                                margin=dict(l=10, r=10, t=30, b=10)), 
+                            use_container_width=True)
+        else:
+            # 미래월/과거월 — 일자 축은 의미 없음. 다운로드 날짜 축으로 OTB 추이 보여주기
+            st.markdown(f"#### 2️⃣ {selected_month}월 OTB 시간대별 확보 추이")
+            st.caption(f"📌 X축: SOB 다운로드 날짜 / Y축: 그 시점에 확보된 {selected_month}월 매출")
+        
+            fig2 = go.Figure()
+            # 목표선 (수평)
+            if not buildup_df.empty:
+                x_range = [buildup_df['date_only'].min(), buildup_df['date_only'].max()]
+            else:
+                x_range = [kst_today.date() - timedelta(days=30), kst_today.date()]
+        
+            fig2.add_trace(go.Scatter(
+                x=x_range, y=[tgt_rev_100m, tgt_rev_100m],
+                name=f"{selected_month}월 목표 ({tgt_rev_100m:.1f}억)",
+                line=dict(color="gray", dash='dash', width=2)
+            ))
+        
+            if not buildup_df.empty:
+                fig2.add_trace(go.Scatter(
+                    x=buildup_df['date_only'], 
+                    y=buildup_df['rev_100m'],
+                    name=f"확보 매출 (Build-up)",
+                    mode='lines+markers',
+                    line=dict(color="#FFD700", width=3),
+                    marker=dict(size=8)
+                ))
+            else:
+                fig2.add_annotation(text="아직 백업된 SOB 스냅샷이 없습니다.<br>SOB 파일을 업로드하고 백업하면 추이가 누적됩니다.",
+                                    xref="paper", yref="paper", x=0.5, y=0.5, showarrow=False,
+                                    font=dict(color="gray", size=12))
+        
+            st.plotly_chart(fig2.update_layout(template="plotly_dark", height=300,
+                                                margin=dict(l=10, r=10, t=30, b=10),
+                                                yaxis_title="누적 매출 (억)"),
+                            use_container_width=True)
     with c3:
         st.markdown("#### 3️⃣ 3개월 전부터의 매출 진화 (Evolution)")
         fig3 = go.Figure()
